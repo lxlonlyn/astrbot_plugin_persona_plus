@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, TypeAlias, TypeVar
@@ -10,6 +11,11 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.message import (
+    AssistantMessageSegment,
+    TextPart,
+    UserMessageSegment,
+)
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.astr_agent_context import AstrAgentContext
@@ -20,6 +26,11 @@ from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .core.config import PersonaPlusSettings, load_settings
+from .core.foreground import (
+    ForegroundLease,
+    make_foreground_lease,
+    render_speaker_block,
+)
 from .core.keyword_switch import match_keyword
 from .core.permissions import check_permission
 from .core.persona_references import PersonaReferenceResolver
@@ -100,7 +111,11 @@ class PersonaPlus(Star):
         self.shift_timezone = ""
         self.handover_idle_seconds = 60
         self.handover_grace_seconds = 300
+        self.foreground_continuation_enabled = True
+        self.foreground_ttl_seconds = 120
+        self.foreground_followup_turns = 3
         self._shift_states: dict[str, ShiftRuntimeState] = {}
+        self._foreground_leases: dict[str, ForegroundLease] = {}
         self._warned_shift_timezones: set[str] = set()
 
         self.qq_sync = QQProfileSync(context)
@@ -190,6 +205,11 @@ class PersonaPlus(Star):
         self.shift_timezone = self.settings.shift_timezone
         self.handover_idle_seconds = self.settings.handover_idle_seconds
         self.handover_grace_seconds = self.settings.handover_grace_seconds
+        self.foreground_continuation_enabled = (
+            self.settings.foreground_continuation_enabled
+        )
+        self.foreground_ttl_seconds = self.settings.foreground_ttl_seconds
+        self.foreground_followup_turns = self.settings.foreground_followup_turns
 
         self.qq_sync.load_config(self.config)
 
@@ -223,6 +243,12 @@ class PersonaPlus(Star):
             self.handover_idle_seconds,
             self.handover_grace_seconds,
             self.shift_timezone or "<AstrBot>",
+        )
+        logger.info(
+            "Persona+ 临时前台：enabled=%s, ttl=%ss, followups=%s, scope=conversation",
+            self.foreground_continuation_enabled,
+            self.foreground_ttl_seconds,
+            self.foreground_followup_turns,
         )
 
     @filter.on_astrbot_loaded()
