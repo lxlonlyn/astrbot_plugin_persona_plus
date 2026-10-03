@@ -47,6 +47,24 @@
     "type": "int",
     "default": 300
   },
+  "enable_foreground_continuation": {
+    "description": "启用临时角色连续发言",
+    "hint": "被当前值班人格临时叫出的角色，在短时间内可以继续回答后续追问；不会改变正式值班人格，并且每个 conversation 独立记录。",
+    "type": "bool",
+    "default": true
+  },
+  "foreground_ttl_seconds": {
+    "description": "临时前台持续时间",
+    "hint": "临时角色每次发言后最多继续保持前台的秒数。超过后自动恢复正式值班人格。",
+    "type": "int",
+    "default": 120
+  },
+  "foreground_followup_turns": {
+    "description": "临时前台最多追问轮数",
+    "hint": "角色被临时叫出后，最多继续回答多少条后续消息；初次临时插话不计入此数。",
+    "type": "int",
+    "default": 3
+  },
   "enable_keyword_switching": {
     "description": "启用关键词切换",
     "hint": "兼容旧用法。定时轮班启用时自动停用，避免关键词直接替换值班人格。",
@@ -60,14 +78,12 @@
     "default": ["关键词:人格"]
   },
   "auto_switch_scope": {
-    "description": "手动/关键词切换作用范围",
-    "hint": "仅影响兼容的手动或关键词切换；定时轮班始终按当前 conversation 切换。",
+    "description": "人格切换作用范围",
+    "hint": "此 fork 强制使用 conversation 级隔离，避免群 A 的人格变化影响群 B、私聊或其他对话。",
     "type": "string",
     "default": "conversation",
     "options": [
-      "conversation",
-      "session",
-      "global"
+      "conversation"
     ]
   },
   "manage_wait_timeout_seconds": {
