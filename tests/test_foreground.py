@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.foreground import (
+    conversation_state_key,
     make_foreground_lease,
     render_speaker_block,
 )
@@ -55,3 +56,13 @@ def test_speaker_marker_distinguishes_initial_interjection_and_followup():
         "我还在。",
         initial=False,
     ) == "【Plana】\n\n我还在。"
+
+
+def test_conversation_state_key_isolates_groups_and_conversations():
+    group_a = conversation_state_key("qq:group:group-a", "conv-1")
+    group_b = conversation_state_key("qq:group:group-b", "conv-1")
+    group_a_other_conv = conversation_state_key("qq:group:group-a", "conv-2")
+
+    assert group_a != group_b
+    assert group_a != group_a_other_conv
+    assert group_b != group_a_other_conv
