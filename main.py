@@ -370,6 +370,106 @@ class PersonaPlus(Star):
             self._shift_states[key] = state
         return state
 
+    async def _get_foreground_lease(
+        self,
+        event: AstrMessageEvent,
+    ) -> ForegroundLease | None:
+        key = await self._get_conversation_state_key(event)
+        lease = self._foreground_leases.get(key)
+        if lease is None:
+            return None
+
+        if not lease.is_active(datetime.now(timezone.utc)):
+            self._foreground_leases.pop(key, None)
+            return None
+        return lease
+
+    async def _clear_foreground_lease(self, event: AstrMessageEvent) -> None:
+        key = await self._get_conversation_state_key(event)
+        self._foreground_leases.pop(key, None)
+
+    async def _activate_foreground_lease(
+        self,
+        event: AstrMessageEvent,
+        persona_id: str,
+    ) -> None:
+        if (
+            not self.foreground_continuation_enabled
+            or self.foreground_ttl_seconds <= 0
+            or self.foreground_followup_turns <= 0
+        ):
+            return
+
+        await self._ensure_current_conversation(event)
+        current_persona = await self._get_current_persona_id(event)
+        if current_persona and current_persona.casefold() == persona_id.casefold():
+            await self._clear_foreground_lease(event)
+            return
+
+        key = await self._get_conversation_state_key(event)
+        self._foreground_leases[key] = make_foreground_lease(
+            persona_id=persona_id,
+            ttl_seconds=self.foreground_ttl_seconds,
+            followup_turns=self.foreground_followup_turns,
+        )
+        logger.info(
+            "Persona+ 临时前台已激活：key=%s persona=%s ttl=%ss followups=%s",
+            key,
+            persona_id,
+            self.foreground_ttl_seconds,
+            self.foreground_followup_turns,
+        )
+
+    async def _load_conversation_context(
+        self,
+        event: AstrMessageEvent,
+    ) -> list[dict]:
+        cid = await self._ensure_current_conversation(event)
+        conversation = await self.context.conversation_manager.get_conversation(
+            event.unified_msg_origin,
+            cid,
+        )
+        if not conversation:
+            return []
+
+        try:
+            history = json.loads(conversation.history or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+        contexts: list[dict] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "assistant" and item.get("tool_calls"):
+                continue
+            clean = dict(item)
+            clean.pop("tool_calls", None)
+            clean.pop("tool_call_id", None)
+            contexts.append(clean)
+        return contexts
+
+    async def _persist_foreground_turn(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        cid = await self._ensure_current_conversation(event)
+        await self.context.conversation_manager.add_message_pair(
+            cid=cid,
+            user_message=UserMessageSegment(
+                content=[TextPart(text=user_text)]
+            ),
+            assistant_message=AssistantMessageSegment(
+                content=[TextPart(text=assistant_text)]
+            ),
+        )
+
     def _resolve_shift_timezone(self, event: AstrMessageEvent):
         timezone_name = self.shift_timezone
         if not timezone_name:
