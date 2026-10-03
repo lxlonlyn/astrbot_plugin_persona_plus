@@ -10,6 +10,7 @@ from .models import KeywordMapping, parse_mapping_entry
 LLM_TOOL_OPTIONS = (
     "list",
     "switch",
+    "delegate",
     "view",
     "create",
     "update",

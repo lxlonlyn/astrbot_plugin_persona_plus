@@ -13,6 +13,7 @@ Persona+ 是一个 AstrBot 人格管理增强插件，用于更方便地创建�
 | --- | --- |
 | 人格管理 | 支持创建、更新、删除、查看人格 |
 | 快捷切换 | 支持 `pp <人格ID>` 快速切换当前会话人格 |
+| 临时委托 | 当前人格可把一次任务交给另一人格处理，完成后保持当前会话人格不变 |
 | 文件夹路径 | 支持使用 `文件夹/人格ID` 定位人格 |
 | 关键词切换 | 根据消息关键词自动切换到指定人格 |
 | 上下文控制 | 切换人格后可自动清空当前对话上下文 |
@@ -69,12 +70,43 @@ Persona+ 提供两类入口：
 | --- | --- | --- |
 | `list` | `persona_list` | 查询人格列表 |
 | `switch` | `persona_switch` | 切换当前会话人格 |
+| `delegate` | `persona_delegate` | 临时委托另一人格处理一次任务，不改变当前会话人格 |
 | `view` | `persona_view` | 查看人格详情 |
 | `create` | `persona_create` | 创建人格，支持完整字段 |
 | `update` | `persona_update` | 更新人格，支持按字段修改 |
 | `avatar` | `persona_avatar` | 读取、设置或移除指定人格的头像 |
 | `export` | `persona_export` | 导出人格 System Prompt 文件 |
 | `delete` | `persona_delete` | 删除人格 |
+
+### 临时委托人格
+
+启用 `llm_tool_options` 中的 `delegate` 后，当前人格可以调用 `persona_delegate`，让另一人格临时处理一次任务。
+
+`persona_delegate` 参数：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `persona_reference` | 是 | 目标人格 ID，或 `文件夹/人格ID` 路径 |
+| `task` | 是 | 要交给目标人格完成的具体任务 |
+
+委托会使用目标人格自己的 System Prompt，并按照目标人格的工具白名单构建一次独立 Agent 调用。Persona+ 自身的人格管理工具会从被委托 Agent 中移除，避免递归委托或意外切换人格。
+
+委托前后的当前会话 `persona_id` 不会被修改，因此适合“值班人格 + 临时叫另一人格帮忙”的场景。例如白天由 Arona 值班时，可以让 Arona 临时把一次任务交给 Plana；任务完成后，下一轮仍由 Arona 作为当前人格继续对话。
+
+推荐配置：
+
+```text
+llm_tool_options:
+  - delegate
+```
+
+如果还希望人格可以永久切班，再同时启用 `switch`：
+
+```text
+llm_tool_options:
+  - delegate
+  - switch
+```
 
 ### 完整创建/更新字段
 

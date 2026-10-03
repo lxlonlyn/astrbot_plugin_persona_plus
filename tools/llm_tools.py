@@ -115,6 +115,54 @@ class PersonaPlusSwitchTool(_BasePersonaTool):
 
 
 @pydantic_dataclass
+class PersonaPlusDelegateTool(_BasePersonaTool):
+    name: str = "persona_delegate"
+    description: str = (
+        "临时委托指定人格处理一次任务，不改变当前会话人格。"
+        "工具返回目标人格的最终答复；调用后应直接转交该答复，不要改写成当前人格口吻。"
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "persona_reference": {
+                    "type": "string",
+                    "description": "临时委托的目标人格 ID，或 文件夹/人格ID 路径",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "希望目标人格完成的具体任务。应包含本轮真正需要处理的问题，不要只写“接手”或“看看”。",
+                },
+            },
+            "required": ["persona_reference", "task"],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        **kwargs: Any,
+    ) -> ToolExecResult:
+        plugin = self.plugin
+        event = self._get_event(context)
+        if plugin is None or event is None:
+            return "临时委托人格失败，请稍后重试。"
+
+        persona_reference = self._as_text(kwargs.get("persona_reference", ""))
+        task = self._as_text(kwargs.get("task", ""))
+        return await plugin._run_llm_tool(
+            "delegate",
+            lambda: plugin._delegate_persona(
+                event=event,
+                persona_reference=persona_reference,
+                task=task,
+                messages=list(context.messages),
+            ),
+            "临时委托人格失败，请稍后重试。",
+        )
+
+
+@pydantic_dataclass
 class PersonaPlusViewTool(_BasePersonaTool):
     name: str = "persona_view"
     description: str = "查看单个人设的完整详情"
@@ -470,6 +518,7 @@ def build_llm_tools(plugin) -> list[FunctionTool[AstrAgentContext]]:
     tools = [
         PersonaPlusListTool(),
         PersonaPlusSwitchTool(),
+        PersonaPlusDelegateTool(),
         PersonaPlusViewTool(),
         PersonaPlusCreateTool(),
         PersonaPlusUpdateTool(),
