@@ -732,11 +732,12 @@ class PersonaPlus(Star):
             qq_sync=self.qq_sync,
             event=event,
             persona_id=resolved_persona_id,
-            scope=self.auto_switch_scope,
+            scope="conversation",
             clear_context_on_switch=self.clear_context_on_switch,
             announce=None,
         )
-        return f"已切换人格为 {resolved_persona_id}"
+        await self._clear_foreground_lease(event)
+        return f"已切换当前对话人格为 {resolved_persona_id}"
 
     def _delegate_toolset(self, persona) -> ToolSet:
         """Build the delegated persona toolset without Persona+ management tools."""
@@ -996,16 +997,18 @@ class PersonaPlus(Star):
         if announce is None and self.auto_switch_announce:
             announce = f"已切换人格为 {resolved_persona_id}"
 
-        return await switch_persona(
+        result = await switch_persona(
             context=self.context,
             persona_mgr=self.persona_mgr,
             qq_sync=self.qq_sync,
             event=event,
             persona_id=resolved_persona_id,
-            scope=self.auto_switch_scope,
+            scope="conversation",
             clear_context_on_switch=self.clear_context_on_switch,
             announce=announce,
         )
+        await self._clear_foreground_lease(event)
+        return result
 
     def _schedule_persona_wait(
         self,
