@@ -97,3 +97,34 @@ def resolve_shift(
         boundary_at=boundary,
         in_primary_window=in_primary,
     )
+
+
+def should_handover(
+    *,
+    now_utc: datetime,
+    boundary_utc: datetime,
+    last_turn_finished_at_utc: datetime | None,
+    turn_inflight: bool,
+    idle_seconds: int,
+    grace_seconds: int,
+) -> tuple[bool, str]:
+    """Decide whether a pending handover may happen before the next turn."""
+
+    if turn_inflight:
+        return False, "turn_inflight"
+
+    grace_elapsed = (now_utc - boundary_utc).total_seconds() >= grace_seconds
+    if grace_elapsed:
+        return True, "grace_elapsed"
+
+    if last_turn_finished_at_utc is None:
+        # No known active turn, e.g. after plugin startup/reload.
+        return True, "no_active_turn"
+
+    idle_elapsed = (
+        now_utc - last_turn_finished_at_utc
+    ).total_seconds() >= idle_seconds
+    if idle_elapsed:
+        return True, "idle_elapsed"
+
+    return False, "cooldown"
