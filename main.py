@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, TypeAlias, TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
+from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.sentinels import NOT_GIVEN
@@ -21,6 +26,11 @@ from .core.persona_references import PersonaReferenceResolver
 from .core.persona_rendering import PersonaRenderer
 from .core.persona_service import PersonaService
 from .core.session_flows import SenderScopedSessionFilter, schedule_persona_wait
+from .core.shift_schedule import (
+    ShiftRuntimeState,
+    format_hhmm,
+    resolve_shift,
+)
 from .core.switching import switch_persona
 from .integrations.qq_profile_sync import QQProfileSync
 from .tools import build_llm_tools
@@ -43,7 +53,6 @@ class PersonaPlus(Star):
 
     LLM_TOOL_NAME_BY_OPTION = {
         "list": "persona_list",
-        "switch": "persona_switch",
         "delegate": "persona_delegate",
         "view": "persona_view",
         "create": "persona_create",
@@ -81,6 +90,17 @@ class PersonaPlus(Star):
         self.clear_context_on_switch = False
         self.llm_tool_options: set[str] = set()
 
+        self.shift_schedule_enabled = False
+        self.shift_primary_persona = "arona"
+        self.shift_secondary_persona = "plana"
+        self.shift_start_minutes = 7 * 60
+        self.shift_end_minutes = 19 * 60
+        self.shift_timezone = ""
+        self.handover_idle_seconds = 60
+        self.handover_grace_seconds = 300
+        self._shift_states: dict[str, ShiftRuntimeState] = {}
+        self._warned_shift_timezones: set[str] = set()
+
         self.qq_sync = QQProfileSync(context)
         self._tasks: set[asyncio.Task] = set()
 
@@ -112,6 +132,7 @@ class PersonaPlus(Star):
 
         tool_mgr = self.context.get_llm_tool_manager()
         persona_tool_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
+        persona_tool_names.add("persona_switch")
         persona_tool_names.update(
             name.replace("persona_", "persona_plus_", 1)
             for name in self.LLM_TOOL_NAME_BY_OPTION.values()
@@ -162,6 +183,15 @@ class PersonaPlus(Star):
         self.clear_context_on_switch = self.settings.clear_context_on_switch
         self.llm_tool_options = self.settings.llm_tool_options
 
+        self.shift_schedule_enabled = self.settings.shift_schedule_enabled
+        self.shift_primary_persona = self.settings.shift_primary_persona
+        self.shift_secondary_persona = self.settings.shift_secondary_persona
+        self.shift_start_minutes = self.settings.shift_start_minutes
+        self.shift_end_minutes = self.settings.shift_end_minutes
+        self.shift_timezone = self.settings.shift_timezone
+        self.handover_idle_seconds = self.settings.handover_idle_seconds
+        self.handover_grace_seconds = self.settings.handover_grace_seconds
+
         self.qq_sync.load_config(self.config)
 
         logger.info(
@@ -183,6 +213,17 @@ class PersonaPlus(Star):
         logger.info(
             "Persona+ 切换后清空上下文：clear_context_on_switch=%s",
             self.clear_context_on_switch,
+        )
+        logger.info(
+            "Persona+ 定时轮班：enabled=%s, %s=%s-%s, 时段外=%s, idle=%ss, grace=%ss, timezone=%s",
+            self.shift_schedule_enabled,
+            self.shift_primary_persona,
+            format_hhmm(self.shift_start_minutes),
+            format_hhmm(self.shift_end_minutes),
+            self.shift_secondary_persona,
+            self.handover_idle_seconds,
+            self.handover_grace_seconds,
+            self.shift_timezone or "<AstrBot>",
         )
 
     @filter.on_astrbot_loaded()
