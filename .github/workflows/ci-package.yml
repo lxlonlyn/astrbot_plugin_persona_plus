@@ -28,7 +28,7 @@ jobs:
         run: python -m compileall -q .
 
       - name: Run Persona+ regression tests
-        run: pytest -q tests/test_shift_schedule.py tests/test_tool_names.py
+        run: pytest -q tests/test_shift_schedule.py tests/test_tool_names.py tests/test_foreground.py
 
       - name: Stage AstrBot plugin package
         run: |
@@ -44,7 +44,7 @@ jobs:
       - name: Upload installable plugin ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: astrbot_plugin_persona_plus-v1.6.1
+          name: astrbot_plugin_persona_plus-v1.7.0
           path: package/
           if-no-files-found: error
           retention-days: 14
