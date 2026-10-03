@@ -85,6 +85,9 @@ class PersonaPlusSettings:
     shift_timezone: str
     handover_idle_seconds: int
     handover_grace_seconds: int
+    foreground_continuation_enabled: bool
+    foreground_ttl_seconds: int
+    foreground_followup_turns: int
 
 
 def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
@@ -111,6 +114,9 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
             shift_timezone="",
             handover_idle_seconds=60,
             handover_grace_seconds=300,
+            foreground_continuation_enabled=True,
+            foreground_ttl_seconds=120,
+            foreground_followup_turns=3,
         )
 
     mappings_raw = config.get("keyword_mappings", [])
@@ -154,7 +160,13 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
 
     keyword_mappings = [m for m in loaded if m.keyword and m.persona_id]
 
-    auto_switch_scope = config.get("auto_switch_scope", "conversation")
+    configured_scope = str(config.get("auto_switch_scope", "conversation") or "conversation").strip()
+    if configured_scope != "conversation":
+        logger.warning(
+            "Persona+ v1.7 起强制使用 conversation 级人格状态；已忽略 auto_switch_scope=%r",
+            configured_scope,
+        )
+    auto_switch_scope = "conversation"
     keyword_switch_enabled = bool(config.get("enable_keyword_switching", True))
 
     admin_commands_raw = config.get(
@@ -242,6 +254,19 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
         "handover_grace_seconds",
         300,
     )
+    foreground_continuation_enabled = bool(
+        config.get("enable_foreground_continuation", True)
+    )
+    foreground_ttl_seconds = _read_non_negative_int(
+        config,
+        "foreground_ttl_seconds",
+        120,
+    )
+    foreground_followup_turns = _read_non_negative_int(
+        config,
+        "foreground_followup_turns",
+        3,
+    )
 
     if shift_schedule_enabled:
         if not shift_primary_persona or not shift_secondary_persona:
@@ -271,4 +296,7 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
         shift_timezone=shift_timezone,
         handover_idle_seconds=handover_idle_seconds,
         handover_grace_seconds=handover_grace_seconds,
+        foreground_continuation_enabled=foreground_continuation_enabled,
+        foreground_ttl_seconds=foreground_ttl_seconds,
+        foreground_followup_turns=foreground_followup_turns,
     )
