@@ -1,3 +1,9 @@
+# v1.6.1
+
+- 修复 `persona_delegate` 在构造 Persona+ 工具黑名单时边遍历边修改同一个 `set`，导致 `RuntimeError: Set changed size during iteration` 的问题。
+- 将 Persona+ 当前工具名、旧版 `persona_plus_*` 别名和历史 `persona_switch` 名称统一通过不可变快照生成，避免同类错误。
+- 新增工具名黑名单回归测试，确保不会生成错误的 `persona_plus_plus_*` 别名。
+
 # v1.6.0
 
 - 新增可开关的双人格定时轮班：配置时段内人格、时段外人格、开始/结束时间与可选时区。
