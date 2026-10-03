@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, TypeAlias, TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
+from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.message import (
+    AssistantMessageSegment,
+    TextPart,
+    UserMessageSegment,
+)
+from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.sentinels import NOT_GIVEN
@@ -15,13 +26,26 @@ from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .core.config import PersonaPlusSettings, load_settings
+from .core.foreground import (
+    ForegroundLease,
+    conversation_state_key,
+    make_foreground_lease,
+    render_speaker_block,
+)
 from .core.keyword_switch import match_keyword
 from .core.permissions import check_permission
 from .core.persona_references import PersonaReferenceResolver
 from .core.persona_rendering import PersonaRenderer
 from .core.persona_service import PersonaService
 from .core.session_flows import SenderScopedSessionFilter, schedule_persona_wait
+from .core.shift_schedule import (
+    ShiftRuntimeState,
+    format_hhmm,
+    resolve_shift,
+    should_handover,
+)
 from .core.switching import switch_persona
+from .core.tool_names import build_persona_management_tool_names
 from .integrations.qq_profile_sync import QQProfileSync
 from .tools import build_llm_tools
 
@@ -43,7 +67,6 @@ class PersonaPlus(Star):
 
     LLM_TOOL_NAME_BY_OPTION = {
         "list": "persona_list",
-        "switch": "persona_switch",
         "delegate": "persona_delegate",
         "view": "persona_view",
         "create": "persona_create",
@@ -81,6 +104,21 @@ class PersonaPlus(Star):
         self.clear_context_on_switch = False
         self.llm_tool_options: set[str] = set()
 
+        self.shift_schedule_enabled = False
+        self.shift_primary_persona = "arona"
+        self.shift_secondary_persona = "plana"
+        self.shift_start_minutes = 7 * 60
+        self.shift_end_minutes = 19 * 60
+        self.shift_timezone = ""
+        self.handover_idle_seconds = 60
+        self.handover_grace_seconds = 300
+        self.foreground_continuation_enabled = True
+        self.foreground_ttl_seconds = 120
+        self.foreground_followup_turns = 3
+        self._shift_states: dict[str, ShiftRuntimeState] = {}
+        self._foreground_leases: dict[str, ForegroundLease] = {}
+        self._warned_shift_timezones: set[str] = set()
+
         self.qq_sync = QQProfileSync(context)
         self._tasks: set[asyncio.Task] = set()
 
@@ -111,10 +149,8 @@ class PersonaPlus(Star):
         """Remove function tools registered by this plugin."""
 
         tool_mgr = self.context.get_llm_tool_manager()
-        persona_tool_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
-        persona_tool_names.update(
-            name.replace("persona_", "persona_plus_", 1)
-            for name in self.LLM_TOOL_NAME_BY_OPTION.values()
+        persona_tool_names = build_persona_management_tool_names(
+            self.LLM_TOOL_NAME_BY_OPTION.values()
         )
         tool_mgr.func_list = [
             tool
@@ -162,6 +198,20 @@ class PersonaPlus(Star):
         self.clear_context_on_switch = self.settings.clear_context_on_switch
         self.llm_tool_options = self.settings.llm_tool_options
 
+        self.shift_schedule_enabled = self.settings.shift_schedule_enabled
+        self.shift_primary_persona = self.settings.shift_primary_persona
+        self.shift_secondary_persona = self.settings.shift_secondary_persona
+        self.shift_start_minutes = self.settings.shift_start_minutes
+        self.shift_end_minutes = self.settings.shift_end_minutes
+        self.shift_timezone = self.settings.shift_timezone
+        self.handover_idle_seconds = self.settings.handover_idle_seconds
+        self.handover_grace_seconds = self.settings.handover_grace_seconds
+        self.foreground_continuation_enabled = (
+            self.settings.foreground_continuation_enabled
+        )
+        self.foreground_ttl_seconds = self.settings.foreground_ttl_seconds
+        self.foreground_followup_turns = self.settings.foreground_followup_turns
+
         self.qq_sync.load_config(self.config)
 
         logger.info(
@@ -183,6 +233,23 @@ class PersonaPlus(Star):
         logger.info(
             "Persona+ 切换后清空上下文：clear_context_on_switch=%s",
             self.clear_context_on_switch,
+        )
+        logger.info(
+            "Persona+ 定时轮班：enabled=%s, %s=%s-%s, 时段外=%s, idle=%ss, grace=%ss, timezone=%s",
+            self.shift_schedule_enabled,
+            self.shift_primary_persona,
+            format_hhmm(self.shift_start_minutes),
+            format_hhmm(self.shift_end_minutes),
+            self.shift_secondary_persona,
+            self.handover_idle_seconds,
+            self.handover_grace_seconds,
+            self.shift_timezone or "<AstrBot>",
+        )
+        logger.info(
+            "Persona+ 临时前台：enabled=%s, ttl=%ss, followups=%s, scope=conversation",
+            self.foreground_continuation_enabled,
+            self.foreground_ttl_seconds,
+            self.foreground_followup_turns,
         )
 
     @filter.on_astrbot_loaded()
@@ -244,8 +311,34 @@ class PersonaPlus(Star):
 
         return f"{text}  (管理员)" if command in self.admin_commands else text
 
+    async def _ensure_current_conversation(
+        self,
+        event: AstrMessageEvent,
+        *,
+        persona_id: str | None = None,
+    ) -> str:
+        """Ensure this exact message origin has its own current conversation."""
+
+        conv_mgr = self.context.conversation_manager
+        cid = await conv_mgr.get_curr_conversation_id(event.unified_msg_origin)
+        if cid:
+            return cid
+
+        cid = await conv_mgr.new_conversation(
+            event.unified_msg_origin,
+            event.get_platform_id(),
+            persona_id=persona_id,
+        )
+        logger.info(
+            "Persona+ 为当前会话创建独立 conversation：umo=%s cid=%s persona=%s",
+            event.unified_msg_origin,
+            cid,
+            persona_id or "<default>",
+        )
+        return cid
+
     async def _get_current_persona_id(self, event: AstrMessageEvent) -> str | None:
-        """Get the persona currently bound to the active conversation."""
+        """Get the persona currently bound to this exact conversation."""
 
         cid = await self.context.conversation_manager.get_curr_conversation_id(
             event.unified_msg_origin
@@ -261,6 +354,286 @@ class PersonaPlus(Star):
             return None
         return conversation.persona_id
 
+    async def _get_conversation_state_key(self, event: AstrMessageEvent) -> str:
+        cid = await self.context.conversation_manager.get_curr_conversation_id(
+            event.unified_msg_origin
+        )
+        return conversation_state_key(event.unified_msg_origin, cid)
+
+    async def _get_shift_state(
+        self,
+        event: AstrMessageEvent,
+    ) -> ShiftRuntimeState:
+        key = await self._get_conversation_state_key(event)
+        state = self._shift_states.get(key)
+        if state is None:
+            state = ShiftRuntimeState()
+            self._shift_states[key] = state
+        return state
+
+    async def _get_foreground_lease(
+        self,
+        event: AstrMessageEvent,
+    ) -> ForegroundLease | None:
+        key = await self._get_conversation_state_key(event)
+        lease = self._foreground_leases.get(key)
+        if lease is None:
+            return None
+
+        if not lease.is_active(datetime.now(timezone.utc)):
+            self._foreground_leases.pop(key, None)
+            return None
+        return lease
+
+    async def _clear_foreground_lease(self, event: AstrMessageEvent) -> None:
+        key = await self._get_conversation_state_key(event)
+        self._foreground_leases.pop(key, None)
+
+    async def _activate_foreground_lease(
+        self,
+        event: AstrMessageEvent,
+        persona_id: str,
+    ) -> None:
+        if (
+            not self.foreground_continuation_enabled
+            or self.foreground_ttl_seconds <= 0
+            or self.foreground_followup_turns <= 0
+        ):
+            return
+
+        await self._ensure_current_conversation(event)
+        current_persona = await self._get_current_persona_id(event)
+        if current_persona and current_persona.casefold() == persona_id.casefold():
+            await self._clear_foreground_lease(event)
+            return
+
+        key = await self._get_conversation_state_key(event)
+        self._foreground_leases[key] = make_foreground_lease(
+            persona_id=persona_id,
+            ttl_seconds=self.foreground_ttl_seconds,
+            followup_turns=self.foreground_followup_turns,
+        )
+        logger.info(
+            "Persona+ 临时前台已激活：key=%s persona=%s ttl=%ss followups=%s",
+            key,
+            persona_id,
+            self.foreground_ttl_seconds,
+            self.foreground_followup_turns,
+        )
+
+    async def _load_conversation_context(
+        self,
+        event: AstrMessageEvent,
+    ) -> list[dict]:
+        cid = await self._ensure_current_conversation(event)
+        conversation = await self.context.conversation_manager.get_conversation(
+            event.unified_msg_origin,
+            cid,
+        )
+        if not conversation:
+            return []
+
+        try:
+            history = json.loads(conversation.history or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+        contexts: list[dict] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "assistant" and item.get("tool_calls"):
+                continue
+            clean = dict(item)
+            clean.pop("tool_calls", None)
+            clean.pop("tool_call_id", None)
+            contexts.append(clean)
+        return contexts
+
+    async def _persist_foreground_turn(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        cid = await self._ensure_current_conversation(event)
+        await self.context.conversation_manager.add_message_pair(
+            cid=cid,
+            user_message=UserMessageSegment(
+                content=[TextPart(text=user_text)]
+            ),
+            assistant_message=AssistantMessageSegment(
+                content=[TextPart(text=assistant_text)]
+            ),
+        )
+
+    def _resolve_shift_timezone(self, event: AstrMessageEvent):
+        timezone_name = self.shift_timezone
+        if not timezone_name:
+            timezone_name = str(
+                self.context.get_config(event.unified_msg_origin).get("timezone")
+                or ""
+            ).strip()
+
+        if timezone_name:
+            try:
+                return ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError):
+                if timezone_name not in self._warned_shift_timezones:
+                    logger.warning(
+                        "Persona+ 无法加载轮班时区 %r，回退到服务器本地时区。",
+                        timezone_name,
+                    )
+                    self._warned_shift_timezones.add(timezone_name)
+
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
+    @staticmethod
+    def _is_persona_plus_command(event: AstrMessageEvent) -> bool:
+        if not event.is_at_or_wake_command:
+            return False
+        parts = event.get_message_str().strip().lower().split()
+        return bool(parts and parts[0] in PersonaPlus.QUICK_SWITCH_ALIASES)
+
+    async def _maybe_apply_shift_schedule(
+        self,
+        event: AstrMessageEvent,
+    ) -> bool:
+        """Apply a pending scheduled handover before the next message is processed."""
+
+        if not self.shift_schedule_enabled:
+            return False
+
+        now_utc = datetime.now(timezone.utc)
+        tz = self._resolve_shift_timezone(event)
+        now_local = now_utc.astimezone(tz)
+        decision = resolve_shift(
+            now=now_local,
+            start_minutes=self.shift_start_minutes,
+            end_minutes=self.shift_end_minutes,
+            primary_persona=self.shift_primary_persona,
+            secondary_persona=self.shift_secondary_persona,
+        )
+
+        cid = await self.context.conversation_manager.get_curr_conversation_id(
+            event.unified_msg_origin
+        )
+        if not cid:
+            try:
+                _, canonical_target = await self.resolver.resolve_for_event(
+                    event,
+                    decision.target_persona,
+                    require_existing=True,
+                )
+            except ValueError as exc:
+                logger.warning("Persona+ 定时轮班人格无效：%s", exc)
+                return False
+
+            await self._ensure_current_conversation(
+                event,
+                persona_id=canonical_target,
+            )
+            logger.info(
+                "Persona+ 首条消息直接绑定当前值班人格：%s",
+                canonical_target,
+            )
+            return True
+
+        try:
+            _, scheduled_persona = await self.resolver.resolve_for_event(
+                event,
+                decision.target_persona,
+                require_existing=True,
+            )
+        except ValueError as exc:
+            logger.warning("Persona+ 定时轮班人格无效：%s", exc)
+            return False
+
+        current_persona = await self._get_current_persona_id(event)
+        state = await self._get_shift_state(event)
+
+        if (
+            current_persona
+            and current_persona.casefold() == scheduled_persona.casefold()
+        ):
+            state.pending_persona = None
+            return False
+
+        if state.pending_persona != scheduled_persona:
+            state.pending_persona = scheduled_persona
+            logger.info(
+                "Persona+ 轮班进入待交接：current=%s target=%s boundary=%s",
+                current_persona or "<unset>",
+                scheduled_persona,
+                decision.boundary_at.isoformat(),
+            )
+
+        boundary_utc = decision.boundary_at.astimezone(timezone.utc)
+        handover_allowed, handover_reason = should_handover(
+            now_utc=now_utc,
+            boundary_utc=boundary_utc,
+            last_turn_finished_at_utc=state.last_turn_finished_at_utc,
+            turn_inflight=state.turn_inflight,
+            idle_seconds=self.handover_idle_seconds,
+            grace_seconds=self.handover_grace_seconds,
+        )
+        if not handover_allowed:
+            return False
+
+        try:
+            await switch_persona(
+                context=self.context,
+                persona_mgr=self.persona_mgr,
+                qq_sync=self.qq_sync,
+                event=event,
+                persona_id=scheduled_persona,
+                scope="conversation",
+                clear_context_on_switch=False,
+                announce=None,
+            )
+        except ValueError as exc:
+            logger.warning("Persona+ 定时轮班切换失败：%s", exc)
+            return False
+
+        state.pending_persona = None
+        logger.info(
+            "Persona+ 已完成定时交班：%s -> %s (%s)",
+            current_persona or "<unset>",
+            scheduled_persona,
+            handover_reason,
+        )
+        return True
+
+    @filter.on_agent_begin()
+    async def on_agent_begin(
+        self,
+        event: AstrMessageEvent,
+        run_context: ContextWrapper[AstrAgentContext],
+    ):
+        if not self.shift_schedule_enabled:
+            return
+        state = await self._get_shift_state(event)
+        state.turn_inflight = True
+        state.turn_started_at_utc = datetime.now(timezone.utc)
+
+    @filter.on_agent_done()
+    async def on_agent_done(
+        self,
+        event: AstrMessageEvent,
+        run_context: ContextWrapper[AstrAgentContext],
+        resp: LLMResponse,
+    ):
+        if not self.shift_schedule_enabled:
+            return
+        state = await self._get_shift_state(event)
+        state.turn_inflight = False
+        state.turn_started_at_utc = None
+        state.last_turn_finished_at_utc = datetime.now(timezone.utc)
+
     async def _render_status(self, event: AstrMessageEvent) -> str:
         """Render Persona+ status for the bare command entry."""
 
@@ -275,15 +648,68 @@ class PersonaPlus(Star):
                 .get("default_personality", "default")
             )
 
-        return "\n".join(
+        lines = [
+            "[Persona+ 状态]",
+            f"当前人格：{current_persona_id or '未设置'}",
+        ]
+
+        if self.shift_schedule_enabled:
+            now_utc = datetime.now(timezone.utc)
+            tz = self._resolve_shift_timezone(event)
+            decision = resolve_shift(
+                now=now_utc.astimezone(tz),
+                start_minutes=self.shift_start_minutes,
+                end_minutes=self.shift_end_minutes,
+                primary_persona=self.shift_primary_persona,
+                secondary_persona=self.shift_secondary_persona,
+            )
+            state = await self._get_shift_state(event)
+            lines.extend(
+                [
+                    f"计划值班：{decision.target_persona}",
+                    (
+                        "待交班：" + state.pending_persona
+                        if state.pending_persona
+                        else "待交班：无"
+                    ),
+                    (
+                        "值班时段："
+                        f"{self.shift_primary_persona} "
+                        f"{format_hhmm(self.shift_start_minutes)}-"
+                        f"{format_hhmm(self.shift_end_minutes)}；"
+                        f"其他时间 {self.shift_secondary_persona}"
+                    ),
+                ]
+            )
+
+        foreground_lease = await self._get_foreground_lease(event)
+        if foreground_lease is not None:
+            remaining_seconds = max(
+                0,
+                int(
+                    (
+                        foreground_lease.expires_at_utc
+                        - datetime.now(timezone.utc)
+                    ).total_seconds()
+                ),
+            )
+            lines.append(
+                "临时前台："
+                f"{foreground_lease.persona_id} "
+                f"(剩余 {foreground_lease.remaining_turns} 轮 / "
+                f"约 {remaining_seconds} 秒)"
+            )
+        else:
+            lines.append("临时前台：无")
+
+        lines.extend(
             [
-                "[Persona+ 状态]",
-                f"当前人格：{current_persona_id or '未设置'}",
                 "",
                 f"发送 {cmd_alias_pp} help 查看帮助。",
                 f"发送 {cmd_alias_pp} list 查看人格列表。",
             ]
         )
+        return "\n".join(lines)
 
     @staticmethod
     def _safe_reply_template(reply_template: str, persona_id: str) -> str | None:
@@ -327,20 +753,19 @@ class PersonaPlus(Star):
             qq_sync=self.qq_sync,
             event=event,
             persona_id=resolved_persona_id,
-            scope=self.auto_switch_scope,
+            scope="conversation",
             clear_context_on_switch=self.clear_context_on_switch,
             announce=None,
         )
-        return f"已切换人格为 {resolved_persona_id}"
+        await self._clear_foreground_lease(event)
+        return f"已切换当前对话人格为 {resolved_persona_id}"
 
     def _delegate_toolset(self, persona) -> ToolSet:
         """Build the delegated persona toolset without Persona+ management tools."""
 
         tool_mgr = self.context.get_llm_tool_manager()
-        blocked_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
-        blocked_names.update(
-            name.replace("persona_", "persona_plus_", 1)
-            for name in blocked_names
+        blocked_names = build_persona_management_tool_names(
+            self.LLM_TOOL_NAME_BY_OPTION.values()
         )
 
         if persona.tools is None:
@@ -388,6 +813,59 @@ class PersonaPlus(Star):
                 break
         return contexts
 
+    async def _run_persona_once(
+        self,
+        *,
+        event: AstrMessageEvent,
+        persona_id: str,
+        prompt: str,
+        contexts: list[dict] | None,
+        foreground_continuation: bool,
+    ) -> str:
+        persona = await self.persona_mgr.get_persona(persona_id)
+        provider_id = await self.context.get_current_chat_provider_id(
+            event.unified_msg_origin
+        )
+
+        if foreground_continuation:
+            mode_notice = (
+                "You are continuing a short temporary foreground conversation "
+                "because the user just called you into the current chat. "
+            )
+        else:
+            mode_notice = (
+                "You are temporarily handling one delegated task because the current "
+                "on-duty persona called you into the conversation. "
+            )
+
+        delegate_notice = (
+            "\n\n[Persona+ temporary foreground]\n"
+            + mode_notice
+            + "Follow this persona's system prompt and answer the user directly. "
+            "You are NOT the formal on-duty persona unless the normal schedule says so. "
+            "Do not say that you have taken over the shift, that you are now on duty, "
+            "or that you permanently control the conversation. "
+            "Do not mention Persona+, tools, delegation, routing, or backend behavior. "
+            "Do not delegate to another persona. "
+            "Do not add your own speaker-label header; the surrounding system will "
+            "identify the speaker.\n"
+            "[/Persona+ temporary foreground]"
+        )
+
+        llm_resp = await self.context.tool_loop_agent(
+            event=event,
+            chat_provider_id=provider_id,
+            prompt=prompt.strip(),
+            contexts=contexts or None,
+            system_prompt=(persona.system_prompt or "").rstrip() + delegate_notice,
+            tools=self._delegate_toolset(persona),
+            max_steps=16,
+        )
+        reply = (llm_resp.completion_text or "").strip()
+        if not reply:
+            raise ValueError(f"人格 {persona_id} 未生成可用回复。")
+        return reply
+
     async def _delegate_persona(
         self,
         *,
@@ -408,43 +886,107 @@ class PersonaPlus(Star):
             persona_reference,
             require_existing=True,
         )
-        persona = await self.persona_mgr.get_persona(resolved_persona_id)
-        provider_id = await self.context.get_current_chat_provider_id(
-            event.unified_msg_origin
-        )
-
-        delegate_notice = (
-            "\n\n[Persona+ temporary delegation]\n"
-            "You are temporarily handling exactly one delegated task as this persona. "
-            "Follow the persona system prompt and answer the delegated task directly. "
-            "The active conversation persona has NOT changed. "
-            "Do not claim permanent control of the conversation, do not change persona, "
-            "and do not delegate to another persona.\n"
-            "[/Persona+ temporary delegation]"
-        )
-        system_prompt = (persona.system_prompt or "").rstrip() + delegate_notice
-        contexts = self._delegate_context(messages)
-        toolset = self._delegate_toolset(persona)
-
-        llm_resp = await self.context.tool_loop_agent(
+        reply = await self._run_persona_once(
             event=event,
-            chat_provider_id=provider_id,
-            prompt=task.strip(),
-            contexts=contexts or None,
-            system_prompt=system_prompt,
-            tools=toolset,
-            max_steps=16,
+            persona_id=resolved_persona_id,
+            prompt=task,
+            contexts=self._delegate_context(messages),
+            foreground_continuation=False,
         )
-        reply = (llm_resp.completion_text or "").strip()
-        if not reply:
-            raise ValueError(f"人格 {resolved_persona_id} 未生成可用回复。")
+        await self._activate_foreground_lease(event, resolved_persona_id)
+        marked_reply = render_speaker_block(
+            resolved_persona_id,
+            reply,
+            initial=True,
+        )
 
         return (
-            f"人格 {resolved_persona_id} 的一次性委托已完成。"
-            "当前会话人格没有改变。请直接向用户转交下面的回复，"
-            "不要总结、改写、解释工具过程，也不要再次切换人格。\n\n"
-            f"{reply}"
+            "临时发言已完成。当前正式值班人格没有改变。"
+            "请把下面内容原样发送给用户，不要总结、改写、补充前后缀，"
+            "也不要解释内部过程：\n\n"
+            f"{marked_reply}"
         )
+
+    async def _maybe_handle_foreground_followup(
+        self,
+        event: AstrMessageEvent,
+    ) -> str | None:
+        """Let a recently summoned persona answer short follow-ups in this conversation."""
+
+        if not self.foreground_continuation_enabled:
+            return None
+
+        lease = await self._get_foreground_lease(event)
+        if lease is None:
+            return None
+
+        current_persona = await self._get_current_persona_id(event)
+        if (
+            current_persona
+            and current_persona.casefold() == lease.persona_id.casefold()
+        ):
+            # The temporary speaker has become the real on-duty persona.
+            await self._clear_foreground_lease(event)
+            return None
+
+        text = event.get_message_str().strip()
+        if not text:
+            return None
+
+        # Calling the formal on-duty persona by its persona ID immediately returns
+        # control to that persona. This check is deliberately local and deterministic.
+        if (
+            current_persona
+            and current_persona.casefold() != lease.persona_id.casefold()
+            and current_persona.casefold() in text.casefold()
+        ):
+            await self._clear_foreground_lease(event)
+            logger.info(
+                "Persona+ 用户点名正式值班人格，结束临时前台：%s",
+                current_persona,
+            )
+            return None
+
+        try:
+            reply = await self._run_persona_once(
+                event=event,
+                persona_id=lease.persona_id,
+                prompt=text,
+                contexts=await self._load_conversation_context(event),
+                foreground_continuation=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Persona+ 临时前台人格 %s 续答失败，已释放前台状态",
+                lease.persona_id,
+            )
+            await self._clear_foreground_lease(event)
+            return None
+
+        marked_reply = render_speaker_block(
+            lease.persona_id,
+            reply,
+            initial=False,
+        )
+        await self._persist_foreground_turn(
+            event,
+            user_text=text,
+            assistant_text=marked_reply,
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        lease.consume(
+            now_utc=now_utc,
+            ttl_seconds=self.foreground_ttl_seconds,
+        )
+        if not lease.is_active(now_utc):
+            await self._clear_foreground_lease(event)
+            logger.info(
+                "Persona+ 临时前台已自然结束：persona=%s",
+                lease.persona_id,
+            )
+
+        return marked_reply
 
     async def _send_export_file(
         self,
@@ -476,16 +1018,18 @@ class PersonaPlus(Star):
         if announce is None and self.auto_switch_announce:
             announce = f"已切换人格为 {resolved_persona_id}"
 
-        return await switch_persona(
+        result = await switch_persona(
             context=self.context,
             persona_mgr=self.persona_mgr,
             qq_sync=self.qq_sync,
             event=event,
             persona_id=resolved_persona_id,
-            scope=self.auto_switch_scope,
+            scope="conversation",
             clear_context_on_switch=self.clear_context_on_switch,
             announce=announce,
         )
+        await self._clear_foreground_lease(event)
+        return result
 
     def _schedule_persona_wait(
         self,
@@ -784,9 +1328,29 @@ class PersonaPlus(Star):
         yield event.plain_result("请发送新的人设内容，可直接发文本或上传文本文件。")
         self._schedule_persona_wait(event, resolved_persona_id, "update")
 
-    # ==================== Auto-switch listener ====================
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    # ==================== Shift schedule / foreground / compatibility listener ====================
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
+        is_persona_command = self._is_persona_plus_command(event)
+
+        # 正式轮班只修改当前 unified_msg_origin 下当前 conversation，
+        # 不修改 session/global 默认人格，因此群 A 与群 B、私聊之间互不影响。
+        if self.shift_schedule_enabled and not is_persona_command:
+            await self._maybe_apply_shift_schedule(event)
+
+        # 最近被点名叫出的角色获得一个很短的“前台发言窗口”。
+        # 它同样按 unified_msg_origin + conversation_id 隔离，不改变正式值班人格。
+        if not is_persona_command:
+            foreground_reply = await self._maybe_handle_foreground_followup(event)
+            if foreground_reply is not None:
+                yield event.plain_result(foreground_reply)
+                event.stop_event()
+                return
+
+        if self.shift_schedule_enabled:
+            return
+
+        # 未开启轮班时保留旧版关键词自动切换能力，但仍强制 conversation 级。
         text = event.get_message_str()
         if not text or not self.keyword_switch_enabled or not self.keyword_mappings:
             return
@@ -820,6 +1384,8 @@ class PersonaPlus(Star):
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
+        self._shift_states.clear()
+        self._foreground_leases.clear()
         self.qq_sync.clear_cache()
 
         logger.info("Persona+ 插件卸载，已清理状态。")
