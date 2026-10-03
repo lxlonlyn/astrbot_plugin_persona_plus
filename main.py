@@ -30,6 +30,7 @@ from .core.shift_schedule import (
     ShiftRuntimeState,
     format_hhmm,
     resolve_shift,
+    should_handover,
 )
 from .core.switching import switch_persona
 from .integrations.qq_profile_sync import QQProfileSync
@@ -383,24 +384,16 @@ class PersonaPlus(Star):
                 decision.boundary_at.isoformat(),
             )
 
-        # 不允许在一个 Agent 仍然执行时换人格。
-        if state.turn_inflight:
-            return False
-
         boundary_utc = decision.boundary_at.astimezone(timezone.utc)
-        grace_elapsed = (
-            now_utc - boundary_utc
-        ).total_seconds() >= self.handover_grace_seconds
-
-        if state.last_turn_finished_at_utc is None:
-            # 插件刚启动/重载时没有可延续的活动轮次，直接校准值班人格。
-            idle_elapsed = True
-        else:
-            idle_elapsed = (
-                now_utc - state.last_turn_finished_at_utc
-            ).total_seconds() >= self.handover_idle_seconds
-
-        if not grace_elapsed and not idle_elapsed:
+        handover_allowed, handover_reason = should_handover(
+            now_utc=now_utc,
+            boundary_utc=boundary_utc,
+            last_turn_finished_at_utc=state.last_turn_finished_at_utc,
+            turn_inflight=state.turn_inflight,
+            idle_seconds=self.handover_idle_seconds,
+            grace_seconds=self.handover_grace_seconds,
+        )
+        if not handover_allowed:
             return False
 
         try:
@@ -423,7 +416,7 @@ class PersonaPlus(Star):
             "Persona+ 已完成定时交班：%s -> %s (%s)",
             current_persona or "<unset>",
             decision.target_persona,
-            "最长宽限到期" if grace_elapsed else "对话已空闲",
+            handover_reason,
         )
         return True
 
