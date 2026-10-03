@@ -28,6 +28,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from .core.config import PersonaPlusSettings, load_settings
 from .core.foreground import (
     ForegroundLease,
+    conversation_state_key,
     make_foreground_lease,
     render_speaker_block,
 )
@@ -357,7 +358,7 @@ class PersonaPlus(Star):
         cid = await self.context.conversation_manager.get_curr_conversation_id(
             event.unified_msg_origin
         )
-        return f"{event.unified_msg_origin}:{cid or '<current>'}"
+        return conversation_state_key(event.unified_msg_origin, cid)
 
     async def _get_shift_state(
         self,
