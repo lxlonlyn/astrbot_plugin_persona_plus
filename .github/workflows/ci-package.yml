@@ -27,8 +27,8 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q .
 
-      - name: Run shift schedule tests
-        run: pytest -q tests/test_shift_schedule.py
+      - name: Run Persona+ regression tests
+        run: pytest -q tests/test_shift_schedule.py tests/test_tool_names.py
 
       - name: Stage AstrBot plugin package
         run: |
@@ -44,7 +44,7 @@ jobs:
       - name: Upload installable plugin ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: astrbot_plugin_persona_plus-v1.6.0
+          name: astrbot_plugin_persona_plus-v1.6.1
           path: package/
           if-no-files-found: error
           retention-days: 14
