@@ -49,3 +49,12 @@ def render_speaker_block(
         else f"【{persona_id}】"
     )
     return f"{label}\n\n{reply.strip()}"
+
+
+def conversation_state_key(
+    unified_msg_origin: str,
+    conversation_id: str | None,
+) -> str:
+    """Build an isolation key that cannot leak runtime state across chats."""
+
+    return f"{unified_msg_origin}:{conversation_id or '<current>'}"
