@@ -302,6 +302,157 @@ class PersonaPlus(Star):
             return None
         return conversation.persona_id
 
+    async def _get_shift_state_key(self, event: AstrMessageEvent) -> str:
+        cid = await self.context.conversation_manager.get_curr_conversation_id(
+            event.unified_msg_origin
+        )
+        return f"{event.unified_msg_origin}:{cid or '<current>'}"
+
+    async def _get_shift_state(
+        self,
+        event: AstrMessageEvent,
+    ) -> ShiftRuntimeState:
+        key = await self._get_shift_state_key(event)
+        state = self._shift_states.get(key)
+        if state is None:
+            state = ShiftRuntimeState()
+            self._shift_states[key] = state
+        return state
+
+    def _resolve_shift_timezone(self, event: AstrMessageEvent):
+        timezone_name = self.shift_timezone
+        if not timezone_name:
+            timezone_name = str(
+                self.context.get_config(event.unified_msg_origin).get("timezone")
+                or ""
+            ).strip()
+
+        if timezone_name:
+            try:
+                return ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError):
+                if timezone_name not in self._warned_shift_timezones:
+                    logger.warning(
+                        "Persona+ 无法加载轮班时区 %r，回退到服务器本地时区。",
+                        timezone_name,
+                    )
+                    self._warned_shift_timezones.add(timezone_name)
+
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
+    @staticmethod
+    def _is_persona_plus_command(event: AstrMessageEvent) -> bool:
+        if not event.is_at_or_wake_command:
+            return False
+        parts = event.get_message_str().strip().lower().split()
+        return bool(parts and parts[0] in PersonaPlus.QUICK_SWITCH_ALIASES)
+
+    async def _maybe_apply_shift_schedule(
+        self,
+        event: AstrMessageEvent,
+    ) -> bool:
+        """Apply a pending scheduled handover before the next message is processed."""
+
+        if not self.shift_schedule_enabled:
+            return False
+
+        now_utc = datetime.now(timezone.utc)
+        tz = self._resolve_shift_timezone(event)
+        now_local = now_utc.astimezone(tz)
+        decision = resolve_shift(
+            now=now_local,
+            start_minutes=self.shift_start_minutes,
+            end_minutes=self.shift_end_minutes,
+            primary_persona=self.shift_primary_persona,
+            secondary_persona=self.shift_secondary_persona,
+        )
+
+        current_persona = await self._get_current_persona_id(event)
+        state = await self._get_shift_state(event)
+
+        if current_persona == decision.target_persona:
+            state.pending_persona = None
+            return False
+
+        if state.pending_persona != decision.target_persona:
+            state.pending_persona = decision.target_persona
+            logger.info(
+                "Persona+ 轮班进入待交接：current=%s target=%s boundary=%s",
+                current_persona or "<unset>",
+                decision.target_persona,
+                decision.boundary_at.isoformat(),
+            )
+
+        # 不允许在一个 Agent 仍然执行时换人格。
+        if state.turn_inflight:
+            return False
+
+        boundary_utc = decision.boundary_at.astimezone(timezone.utc)
+        grace_elapsed = (
+            now_utc - boundary_utc
+        ).total_seconds() >= self.handover_grace_seconds
+
+        if state.last_turn_finished_at_utc is None:
+            # 插件刚启动/重载时没有可延续的活动轮次，直接校准值班人格。
+            idle_elapsed = True
+        else:
+            idle_elapsed = (
+                now_utc - state.last_turn_finished_at_utc
+            ).total_seconds() >= self.handover_idle_seconds
+
+        if not grace_elapsed and not idle_elapsed:
+            return False
+
+        try:
+            await switch_persona(
+                context=self.context,
+                persona_mgr=self.persona_mgr,
+                qq_sync=self.qq_sync,
+                event=event,
+                persona_id=decision.target_persona,
+                scope="conversation",
+                clear_context_on_switch=False,
+                announce=None,
+            )
+        except ValueError as exc:
+            logger.warning("Persona+ 定时轮班切换失败：%s", exc)
+            return False
+
+        state.pending_persona = None
+        logger.info(
+            "Persona+ 已完成定时交班：%s -> %s (%s)",
+            current_persona or "<unset>",
+            decision.target_persona,
+            "最长宽限到期" if grace_elapsed else "对话已空闲",
+        )
+        return True
+
+    @filter.on_agent_begin()
+    async def on_agent_begin(
+        self,
+        event: AstrMessageEvent,
+        run_context: ContextWrapper[AstrAgentContext],
+    ):
+        if not self.shift_schedule_enabled:
+            return
+        state = await self._get_shift_state(event)
+        state.turn_inflight = True
+        state.turn_started_at_utc = datetime.now(timezone.utc)
+
+    @filter.on_agent_done()
+    async def on_agent_done(
+        self,
+        event: AstrMessageEvent,
+        run_context: ContextWrapper[AstrAgentContext],
+        resp: LLMResponse,
+    ):
+        if not self.shift_schedule_enabled:
+            return
+        state = await self._get_shift_state(event)
+        state.turn_inflight = False
+        state.turn_started_at_utc = None
+        state.last_turn_finished_at_utc = datetime.now(timezone.utc)
+
     async def _render_status(self, event: AstrMessageEvent) -> str:
         """Render Persona+ status for the bare command entry."""
 
@@ -379,6 +530,7 @@ class PersonaPlus(Star):
 
         tool_mgr = self.context.get_llm_tool_manager()
         blocked_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
+        blocked_names.add("persona_switch")
         blocked_names.update(
             name.replace("persona_", "persona_plus_", 1)
             for name in blocked_names
