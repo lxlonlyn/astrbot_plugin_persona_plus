@@ -681,6 +681,26 @@ class PersonaPlus(Star):
                 ]
             )
 
+        foreground_lease = await self._get_foreground_lease(event)
+        if foreground_lease is not None:
+            remaining_seconds = max(
+                0,
+                int(
+                    (
+                        foreground_lease.expires_at_utc
+                        - datetime.now(timezone.utc)
+                    ).total_seconds()
+                ),
+            )
+            lines.append(
+                "临时前台："
+                f"{foreground_lease.persona_id} "
+                f"(剩余 {foreground_lease.remaining_turns} 轮 / "
+                f"约 {remaining_seconds} 秒)"
+            )
+        else:
+            lines.append("临时前台：无")
+
         lines.extend(
             [
                 "",
