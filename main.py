@@ -33,6 +33,7 @@ from .core.shift_schedule import (
     should_handover,
 )
 from .core.switching import switch_persona
+from .core.tool_names import build_persona_management_tool_names
 from .integrations.qq_profile_sync import QQProfileSync
 from .tools import build_llm_tools
 
@@ -132,11 +133,8 @@ class PersonaPlus(Star):
         """Remove function tools registered by this plugin."""
 
         tool_mgr = self.context.get_llm_tool_manager()
-        persona_tool_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
-        persona_tool_names.update({"persona_switch", "persona_plus_switch"})
-        persona_tool_names.update(
-            name.replace("persona_", "persona_plus_", 1)
-            for name in self.LLM_TOOL_NAME_BY_OPTION.values()
+        persona_tool_names = build_persona_management_tool_names(
+            self.LLM_TOOL_NAME_BY_OPTION.values()
         )
         tool_mgr.func_list = [
             tool
@@ -555,11 +553,8 @@ class PersonaPlus(Star):
         """Build the delegated persona toolset without Persona+ management tools."""
 
         tool_mgr = self.context.get_llm_tool_manager()
-        blocked_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
-        blocked_names.update({"persona_switch", "persona_plus_switch"})
-        blocked_names.update(
-            name.replace("persona_", "persona_plus_", 1)
-            for name in blocked_names
+        blocked_names = build_persona_management_tool_names(
+            self.LLM_TOOL_NAME_BY_OPTION.values()
         )
 
         if persona.tools is None:
