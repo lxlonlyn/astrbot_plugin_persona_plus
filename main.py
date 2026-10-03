@@ -872,6 +872,87 @@ class PersonaPlus(Star):
             f"{marked_reply}"
         )
 
+    async def _maybe_handle_foreground_followup(
+        self,
+        event: AstrMessageEvent,
+    ) -> str | None:
+        """Let a recently summoned persona answer short follow-ups in this conversation."""
+
+        if not self.foreground_continuation_enabled:
+            return None
+
+        lease = await self._get_foreground_lease(event)
+        if lease is None:
+            return None
+
+        current_persona = await self._get_current_persona_id(event)
+        if (
+            current_persona
+            and current_persona.casefold() == lease.persona_id.casefold()
+        ):
+            # The temporary speaker has become the real on-duty persona.
+            await self._clear_foreground_lease(event)
+            return None
+
+        text = event.get_message_str().strip()
+        if not text:
+            return None
+
+        # Calling the formal on-duty persona by its persona ID immediately returns
+        # control to that persona. This check is deliberately local and deterministic.
+        if (
+            current_persona
+            and current_persona.casefold() != lease.persona_id.casefold()
+            and current_persona.casefold() in text.casefold()
+        ):
+            await self._clear_foreground_lease(event)
+            logger.info(
+                "Persona+ 用户点名正式值班人格，结束临时前台：%s",
+                current_persona,
+            )
+            return None
+
+        try:
+            reply = await self._run_persona_once(
+                event=event,
+                persona_id=lease.persona_id,
+                prompt=text,
+                contexts=await self._load_conversation_context(event),
+                foreground_continuation=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Persona+ 临时前台人格 %s 续答失败，已释放前台状态",
+                lease.persona_id,
+            )
+            await self._clear_foreground_lease(event)
+            return None
+
+        marked_reply = render_speaker_block(
+            lease.persona_id,
+            reply,
+            initial=False,
+        )
+        await self._persist_foreground_turn(
+            event,
+            user_text=text,
+            assistant_text=marked_reply,
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        lease.consume(
+            now_utc=now_utc,
+            ttl_seconds=self.foreground_ttl_seconds,
+        )
+        if not lease.is_active(now_utc):
+            await self._clear_foreground_lease(event)
+            logger.info(
+                "Persona+ 临时前台已自然结束：persona=%s",
+                lease.persona_id,
+            )
+
+        return marked_reply
+
     async def _send_export_file(
         self,
         event: AstrMessageEvent,
