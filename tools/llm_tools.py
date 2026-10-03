@@ -517,7 +517,6 @@ class PersonaPlusDeleteTool(_BasePersonaTool):
 def build_llm_tools(plugin) -> list[FunctionTool[AstrAgentContext]]:
     tools = [
         PersonaPlusListTool(),
-        PersonaPlusSwitchTool(),
         PersonaPlusDelegateTool(),
         PersonaPlusViewTool(),
         PersonaPlusCreateTool(),
