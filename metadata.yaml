@@ -1,7 +1,7 @@
 name: astrbot_plugin_persona_plus
 display_name: 人格管理增强
 desc: 提供人格管理、一次性临时委托与双人格定时轮班；支持安全交班冷却、管理指令和 QQ 资料同步
-short_desc: 增强人格管理，支持临时委托与安全定时轮班
-version: v1.6.1
+short_desc: 双人格轮班、临时插话与会话级隔离
+version: v1.7.0
 author: Railgun19457 / lxlonlyn
 repo: https://github.com/lxlonlyn/astrbot_plugin_persona_plus
