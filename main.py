@@ -7,6 +7,7 @@ from typing import Awaitable, Callable, TypeAlias, TypeVar
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.tool import ToolSet
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.sentinels import NOT_GIVEN
@@ -43,6 +44,7 @@ class PersonaPlus(Star):
     LLM_TOOL_NAME_BY_OPTION = {
         "list": "persona_list",
         "switch": "persona_switch",
+        "delegate": "persona_delegate",
         "view": "persona_view",
         "create": "persona_create",
         "update": "persona_update",
@@ -330,6 +332,112 @@ class PersonaPlus(Star):
             announce=None,
         )
         return f"已切换人格为 {resolved_persona_id}"
+
+    def _delegate_toolset(self, persona) -> ToolSet:
+        """Build the delegated persona toolset without Persona+ management tools."""
+
+        tool_mgr = self.context.get_llm_tool_manager()
+        blocked_names = set(self.LLM_TOOL_NAME_BY_OPTION.values())
+        blocked_names.update(
+            name.replace("persona_", "persona_plus_", 1)
+            for name in blocked_names
+        )
+
+        if persona.tools is None:
+            toolset = tool_mgr.get_full_tool_set()
+            for tool in list(toolset):
+                if not tool.active or tool.name in blocked_names:
+                    toolset.remove_tool(tool.name)
+            return toolset
+
+        toolset = ToolSet()
+        for tool_name in persona.tools or []:
+            tool = tool_mgr.get_func(tool_name)
+            if tool and tool.active and tool.name not in blocked_names:
+                toolset.add_tool(tool)
+        return toolset
+
+    @staticmethod
+    def _delegate_context(messages: list) -> list[dict]:
+        """Keep ordinary chat context while removing caller system/tool state."""
+
+        contexts: list[dict] = []
+        for message in messages:
+            if hasattr(message, "model_dump"):
+                item = message.model_dump()
+            elif isinstance(message, dict):
+                item = dict(message)
+            else:
+                continue
+
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "assistant" and item.get("tool_calls"):
+                continue
+
+            item.pop("tool_calls", None)
+            item.pop("tool_call_id", None)
+            contexts.append(item)
+        return contexts
+
+    async def _delegate_persona(
+        self,
+        *,
+        event: AstrMessageEvent,
+        persona_reference: str,
+        task: str,
+        messages: list,
+    ) -> str:
+        """Run one isolated task as another persona without changing conversation persona."""
+
+        if not persona_reference.strip():
+            raise ValueError("必须指定要临时委托的人格。")
+        if not task.strip():
+            raise ValueError("必须提供要委托处理的具体任务。")
+
+        _, resolved_persona_id = await self.resolver.resolve_for_event(
+            event,
+            persona_reference,
+            require_existing=True,
+        )
+        persona = await self.persona_mgr.get_persona(resolved_persona_id)
+        provider_id = await self.context.get_current_chat_provider_id(
+            event.unified_msg_origin
+        )
+
+        delegate_notice = (
+            "\n\n[Persona+ temporary delegation]\n"
+            "You are temporarily handling exactly one delegated task as this persona. "
+            "Follow the persona system prompt and answer the delegated task directly. "
+            "The active conversation persona has NOT changed. "
+            "Do not claim permanent control of the conversation, do not change persona, "
+            "and do not delegate to another persona.\n"
+            "[/Persona+ temporary delegation]"
+        )
+        system_prompt = (persona.system_prompt or "").rstrip() + delegate_notice
+        contexts = self._delegate_context(messages)
+        toolset = self._delegate_toolset(persona)
+
+        llm_resp = await self.context.tool_loop_agent(
+            event=event,
+            chat_provider_id=provider_id,
+            prompt=task.strip(),
+            contexts=contexts or None,
+            system_prompt=system_prompt,
+            tools=toolset,
+            max_steps=16,
+        )
+        reply = (llm_resp.completion_text or "").strip()
+        if not reply:
+            raise ValueError(f"人格 {resolved_persona_id} 未生成可用回复。")
+
+        return (
+            f"人格 {resolved_persona_id} 的一次性委托已完成。"
+            "当前会话人格没有改变。请直接向用户转交下面的回复，"
+            "不要总结、改写、解释工具过程，也不要再次切换人格。\n\n"
+            f"{reply}"
+        )
 
     async def _send_export_file(
         self,
