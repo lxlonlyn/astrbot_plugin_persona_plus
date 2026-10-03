@@ -13,8 +13,10 @@ Persona+ 是一个 AstrBot 人格管理增强插件。此 fork 在原有人格�
 | --- | --- |
 | 人格管理 | 支持创建、更新、删除、查看人格 |
 | 快捷切换 | 保留 `pp <人格ID>` 作为管理员调试/故障恢复入口，不向 LLM 暴露永久切换能力 |
-| 临时委托 | 当前人格可把一次任务交给另一人格处理，完成后保持当前会话人格不变 |
+| 临时委托 | 当前人格可把一次任务交给另一人格处理，并以明确说话人标记显示；不会改变正式值班人格 |
+| 临时前台 | 被叫出的角色可在短时间内继续回答后续追问，默认 120 秒 / 3 轮 |
 | 定时轮班 | 按可配置时间范围选择值班人格，并通过空闲冷却与最长宽限避免在连续对话中生硬换人 |
+| 会话隔离 | 所有动态人格状态按 unified_msg_origin + conversation_id 隔离，群 A 不会影响群 B 或私聊 |
 | 文件夹路径 | 支持使用 `文件夹/人格ID` 定位人格 |
 | 关键词切换 | 根据消息关键词自动切换到指定人格 |
 | 上下文控制 | 切换人格后可自动清空当前对话上下文 |
@@ -91,7 +93,7 @@ Persona+ 提供两类入口：
 
 委托会使用目标人格自己的 System Prompt，并按照目标人格的工具白名单构建一次独立 Agent 调用。Persona+ 自身的人格管理工具会从被委托 Agent 中移除，避免递归委托或意外切换人格。
 
-委托前后的当前会话 `persona_id` 不会被修改，因此适合“值班人格 + 临时叫另一人格帮忙”的场景。例如白天由 Arona 值班时，可以让 Arona 临时把一次任务交给 Plana；任务完成后，下一轮仍由 Arona 作为当前人格继续对话。
+委托前后的正式 `conversation.persona_id` 不会被修改，因此适合“值班人格 + 临时叫另一人格帮忙”的场景。v1.7 起，初次临时出场会显示 `【Plana｜临时插话】` 这样的说话人标记；被叫出的角色还可以在一个短暂的临时前台窗口内继续回答后续追问，而正式值班人格仍保持不变。
 
 推荐配置：
 
@@ -101,6 +103,34 @@ llm_tool_options:
 ```
 
 v1.6 起不再提供 LLM 永久切换人格的工具。正式值班由轮班调度器决定；`pp switch` 仅作为管理员调试/故障恢复命令保留。
+
+### 临时前台与“中间插话”
+
+默认配置下，被 `persona_delegate` 叫出的角色会：
+
+1. 首次回复带 `【人格ID｜临时插话】` 标记；
+2. 在之后 120 秒内继续保持临时前台；
+3. 最多继续回答 3 条后续消息；
+4. 每次续答显示 `【人格ID】`；
+5. 超时、轮数耗尽、正式值班人格被点名，或临时角色已经成为正式值班人格时自动退出。
+
+例如白班正式值班是 Arona：
+
+```text
+老师：让 Plana 说句话
+
+【Plana｜临时插话】
+在，老师。我还在什亭之匣。
+
+老师：那你姐姐要吃醋了怎么办？
+
+【Plana】
+……我认为阿洛娜前辈不会因为这种事情生气，老师。
+```
+
+这期间正式值班仍然是 Arona；临时前台只是决定“当前几句话由谁直接回答”。
+
+人格 ID 自然语言引用采用大小写宽容匹配，因此 `plana` 可以唯一解析到数据库中的 `Plana`。
 
 ### 完整创建/更新字段
 
@@ -143,6 +173,25 @@ v1.6 起不再提供 LLM 永久切换人格的工具。正式值班由轮班调�
 - “读取 `客服助手` 当前的头像文件路径。”
 - “移除 `绘图/海报助手` 的头像。”
 - “把 `客服助手` 的人设导出成文件发给我。”
+
+## 会话级隔离
+
+此 fork 强制所有人格切换使用 `conversation` scope。运行时状态的键由：
+
+```text
+unified_msg_origin + conversation_id
+```
+
+共同组成。
+
+因此：
+
+- 群 A 的 Arona/Plana 轮班不会改变群 B；
+- 群聊不会改变私聊；
+- 同一会话中新建不同 conversation 时，轮班冷却和临时前台状态也彼此独立；
+- 不再允许通过配置把人格切换扩散到 session 或 global。
+
+管理员的 `pp switch` 也只修改当前 conversation。
 
 ## 定时轮班
 
@@ -227,9 +276,12 @@ QQ 资料同步仅适配 NapCat / OneBot 链路。
 | `shift_timezone` | string | 空 | 留空跟随 AstrBot 时区，或填写 IANA 时区 |
 | `handover_idle_seconds` | int | `60` | 到点后需要的连续对话空闲时间 |
 | `handover_grace_seconds` | int | `300` | 连续对话允许旧人格延迟交班的最长时间 |
+| `enable_foreground_continuation` | bool | `true` | 是否启用临时角色连续发言 |
+| `foreground_ttl_seconds` | int | `120` | 临时角色每次发言后保持前台的最长秒数 |
+| `foreground_followup_turns` | int | `3` | 初次临时插话后最多继续回答的后续消息数 |
 | `enable_keyword_switching` | bool | `true` | 兼容旧版关键词切换；轮班开启时自动停用 |
 | `keyword_mappings` | list | `["关键词:人格"]` | 关键词与人格映射；仅在轮班关闭时生效 |
-| `auto_switch_scope` | `conversation` / `session` / `global` | `conversation` | 仅影响旧版手动/关键词切换；定时轮班固定作用于当前 conversation |
+| `auto_switch_scope` | `conversation` | `conversation` | v1.7 起强制 conversation 级隔离；旧配置中的 session/global 会被忽略 |
 | `manage_wait_timeout_seconds` | int | `60` | 创建、更新人格或上传头像时等待用户内容的最长时间 |
 | `admin_commands` | list | 含 `switch` | `switch` 始终仅允许管理员，用作调试/故障恢复 |
 | `llm_tool_options` | list | `[]` | 向 LLM 暴露的人格函数工具；不再包含 `switch` |
