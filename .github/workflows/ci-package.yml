@@ -1,0 +1,50 @@
+name: Persona+ CI and package
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Compile Python sources
+        run: python -m compileall -q .
+
+      - name: Run shift schedule tests
+        run: pytest -q tests/test_shift_schedule.py
+
+      - name: Stage AstrBot plugin package
+        run: |
+          mkdir -p package
+          rsync -a ./ package/ \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'tests/' \
+            --exclude 'package/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc'
+
+      - name: Upload installable plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrbot_plugin_persona_plus-v1.6.0
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
