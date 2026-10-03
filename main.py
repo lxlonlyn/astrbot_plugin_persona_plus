@@ -1291,17 +1291,29 @@ class PersonaPlus(Star):
         yield event.plain_result("请发送新的人设内容，可直接发文本或上传文本文件。")
         self._schedule_persona_wait(event, resolved_persona_id, "update")
 
-    # ==================== Shift schedule / compatibility listener ====================
+    # ==================== Shift schedule / foreground / compatibility listener ====================
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
-        # 轮班模式拥有唯一的人格选择权。每条消息只做本地时间与状态比较，
-        # 不调用 LLM；真正的人格写入仅在需要交班时发生。
+        is_persona_command = self._is_persona_plus_command(event)
+
+        # 正式轮班只修改当前 unified_msg_origin 下当前 conversation，
+        # 不修改 session/global 默认人格，因此群 A 与群 B、私聊之间互不影响。
+        if self.shift_schedule_enabled and not is_persona_command:
+            await self._maybe_apply_shift_schedule(event)
+
+        # 最近被点名叫出的角色获得一个很短的“前台发言窗口”。
+        # 它同样按 unified_msg_origin + conversation_id 隔离，不改变正式值班人格。
+        if not is_persona_command:
+            foreground_reply = await self._maybe_handle_foreground_followup(event)
+            if foreground_reply is not None:
+                yield event.plain_result(foreground_reply)
+                event.stop_event()
+                return
+
         if self.shift_schedule_enabled:
-            if not self._is_persona_plus_command(event):
-                await self._maybe_apply_shift_schedule(event)
             return
 
-        # 未开启轮班时保留旧版关键词自动切换能力。
+        # 未开启轮班时保留旧版关键词自动切换能力，但仍强制 conversation 级。
         text = event.get_message_str()
         if not text or not self.keyword_switch_enabled or not self.keyword_mappings:
             return
@@ -1336,6 +1348,7 @@ class PersonaPlus(Star):
             task.cancel()
         self._tasks.clear()
         self._shift_states.clear()
+        self._foreground_leases.clear()
         self.qq_sync.clear_cache()
 
         logger.info("Persona+ 插件卸载，已清理状态。")
