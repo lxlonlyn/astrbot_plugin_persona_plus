@@ -1011,7 +1011,7 @@ class PersonaPlus(Star):
         self._schedule_persona_wait(event, resolved_persona_id, "update")
 
     # ==================== Shift schedule / compatibility listener ====================
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
         # 轮班模式拥有唯一的人格选择权。每条消息只做本地时间与状态比较，
         # 不调用 LLM；真正的人格写入仅在需要交班时发生。
