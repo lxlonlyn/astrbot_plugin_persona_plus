@@ -467,15 +467,48 @@ class PersonaPlus(Star):
                 .get("default_personality", "default")
             )
 
-        return "\n".join(
+        lines = [
+            "[Persona+ 状态]",
+            f"当前人格：{current_persona_id or '未设置'}",
+        ]
+
+        if self.shift_schedule_enabled:
+            now_utc = datetime.now(timezone.utc)
+            tz = self._resolve_shift_timezone(event)
+            decision = resolve_shift(
+                now=now_utc.astimezone(tz),
+                start_minutes=self.shift_start_minutes,
+                end_minutes=self.shift_end_minutes,
+                primary_persona=self.shift_primary_persona,
+                secondary_persona=self.shift_secondary_persona,
+            )
+            state = await self._get_shift_state(event)
+            lines.extend(
+                [
+                    f"计划值班：{decision.target_persona}",
+                    (
+                        "待交班：" + state.pending_persona
+                        if state.pending_persona
+                        else "待交班：无"
+                    ),
+                    (
+                        "值班时段："
+                        f"{self.shift_primary_persona} "
+                        f"{format_hhmm(self.shift_start_minutes)}-"
+                        f"{format_hhmm(self.shift_end_minutes)}；"
+                        f"其他时间 {self.shift_secondary_persona}"
+                    ),
+                ]
+            )
+
+        lines.extend(
             [
-                "[Persona+ 状态]",
-                f"当前人格：{current_persona_id or '未设置'}",
                 "",
                 f"发送 {cmd_alias_pp} help 查看帮助。",
                 f"发送 {cmd_alias_pp} list 查看人格列表。",
             ]
         )
+        return "\n".join(lines)
 
     @staticmethod
     def _safe_reply_template(reply_template: str, persona_id: str) -> str | None:
@@ -977,9 +1010,17 @@ class PersonaPlus(Star):
         yield event.plain_result("请发送新的人设内容，可直接发文本或上传文本文件。")
         self._schedule_persona_wait(event, resolved_persona_id, "update")
 
-    # ==================== Auto-switch listener ====================
+    # ==================== Shift schedule / compatibility listener ====================
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
+        # 轮班模式拥有唯一的人格选择权。每条消息只做本地时间与状态比较，
+        # 不调用 LLM；真正的人格写入仅在需要交班时发生。
+        if self.shift_schedule_enabled:
+            if not self._is_persona_plus_command(event):
+                await self._maybe_apply_shift_schedule(event)
+            return
+
+        # 未开启轮班时保留旧版关键词自动切换能力。
         text = event.get_message_str()
         if not text or not self.keyword_switch_enabled or not self.keyword_mappings:
             return
@@ -1013,6 +1054,7 @@ class PersonaPlus(Star):
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
+        self._shift_states.clear()
         self.qq_sync.clear_cache()
 
         logger.info("Persona+ 插件卸载，已清理状态。")
