@@ -13,7 +13,7 @@ def build_persona_management_tool_names(tool_names: Iterable[str]) -> set[str]:
     legacy_names = {
         name.replace("persona_", "persona_plus_", 1)
         for name in current_names
-        if name.startswith("persona_")
+        if name.startswith("persona_") and not name.startswith("persona_plus_")
     }
     return (
         current_names
