@@ -778,6 +778,59 @@ class PersonaPlus(Star):
                 break
         return contexts
 
+    async def _run_persona_once(
+        self,
+        *,
+        event: AstrMessageEvent,
+        persona_id: str,
+        prompt: str,
+        contexts: list[dict] | None,
+        foreground_continuation: bool,
+    ) -> str:
+        persona = await self.persona_mgr.get_persona(persona_id)
+        provider_id = await self.context.get_current_chat_provider_id(
+            event.unified_msg_origin
+        )
+
+        if foreground_continuation:
+            mode_notice = (
+                "You are continuing a short temporary foreground conversation "
+                "because the user just called you into the current chat. "
+            )
+        else:
+            mode_notice = (
+                "You are temporarily handling one delegated task because the current "
+                "on-duty persona called you into the conversation. "
+            )
+
+        delegate_notice = (
+            "\n\n[Persona+ temporary foreground]\n"
+            + mode_notice
+            + "Follow this persona's system prompt and answer the user directly. "
+            "You are NOT the formal on-duty persona unless the normal schedule says so. "
+            "Do not say that you have taken over the shift, that you are now on duty, "
+            "or that you permanently control the conversation. "
+            "Do not mention Persona+, tools, delegation, routing, or backend behavior. "
+            "Do not delegate to another persona. "
+            "Do not add your own speaker-label header; the surrounding system will "
+            "identify the speaker.\n"
+            "[/Persona+ temporary foreground]"
+        )
+
+        llm_resp = await self.context.tool_loop_agent(
+            event=event,
+            chat_provider_id=provider_id,
+            prompt=prompt.strip(),
+            contexts=contexts or None,
+            system_prompt=(persona.system_prompt or "").rstrip() + delegate_notice,
+            tools=self._delegate_toolset(persona),
+            max_steps=16,
+        )
+        reply = (llm_resp.completion_text or "").strip()
+        if not reply:
+            raise ValueError(f"人格 {persona_id} 未生成可用回复。")
+        return reply
+
     async def _delegate_persona(
         self,
         *,
@@ -798,42 +851,25 @@ class PersonaPlus(Star):
             persona_reference,
             require_existing=True,
         )
-        persona = await self.persona_mgr.get_persona(resolved_persona_id)
-        provider_id = await self.context.get_current_chat_provider_id(
-            event.unified_msg_origin
-        )
-
-        delegate_notice = (
-            "\n\n[Persona+ temporary delegation]\n"
-            "You are temporarily handling exactly one delegated task as this persona. "
-            "Follow the persona system prompt and answer the delegated task directly. "
-            "The active conversation persona has NOT changed. "
-            "Do not claim permanent control of the conversation, do not change persona, "
-            "and do not delegate to another persona.\n"
-            "[/Persona+ temporary delegation]"
-        )
-        system_prompt = (persona.system_prompt or "").rstrip() + delegate_notice
-        contexts = self._delegate_context(messages)
-        toolset = self._delegate_toolset(persona)
-
-        llm_resp = await self.context.tool_loop_agent(
+        reply = await self._run_persona_once(
             event=event,
-            chat_provider_id=provider_id,
-            prompt=task.strip(),
-            contexts=contexts or None,
-            system_prompt=system_prompt,
-            tools=toolset,
-            max_steps=16,
+            persona_id=resolved_persona_id,
+            prompt=task,
+            contexts=self._delegate_context(messages),
+            foreground_continuation=False,
         )
-        reply = (llm_resp.completion_text or "").strip()
-        if not reply:
-            raise ValueError(f"人格 {resolved_persona_id} 未生成可用回复。")
+        await self._activate_foreground_lease(event, resolved_persona_id)
+        marked_reply = render_speaker_block(
+            resolved_persona_id,
+            reply,
+            initial=True,
+        )
 
         return (
-            f"人格 {resolved_persona_id} 的一次性委托已完成。"
-            "当前会话人格没有改变。请直接向用户转交下面的回复，"
-            "不要总结、改写、解释工具过程，也不要再次切换人格。\n\n"
-            f"{reply}"
+            "临时发言已完成。当前正式值班人格没有改变。"
+            "请把下面内容原样发送给用户，不要总结、改写、补充前后缀，"
+            "也不要解释内部过程：\n\n"
+            f"{marked_reply}"
         )
 
     async def _send_export_file(
