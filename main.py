@@ -542,19 +542,32 @@ class PersonaPlus(Star):
             )
             return True
 
+        try:
+            _, scheduled_persona = await self.resolver.resolve_for_event(
+                event,
+                decision.target_persona,
+                require_existing=True,
+            )
+        except ValueError as exc:
+            logger.warning("Persona+ 定时轮班人格无效：%s", exc)
+            return False
+
         current_persona = await self._get_current_persona_id(event)
         state = await self._get_shift_state(event)
 
-        if current_persona == decision.target_persona:
+        if (
+            current_persona
+            and current_persona.casefold() == scheduled_persona.casefold()
+        ):
             state.pending_persona = None
             return False
 
-        if state.pending_persona != decision.target_persona:
-            state.pending_persona = decision.target_persona
+        if state.pending_persona != scheduled_persona:
+            state.pending_persona = scheduled_persona
             logger.info(
                 "Persona+ 轮班进入待交接：current=%s target=%s boundary=%s",
                 current_persona or "<unset>",
-                decision.target_persona,
+                scheduled_persona,
                 decision.boundary_at.isoformat(),
             )
 
@@ -576,7 +589,7 @@ class PersonaPlus(Star):
                 persona_mgr=self.persona_mgr,
                 qq_sync=self.qq_sync,
                 event=event,
-                persona_id=decision.target_persona,
+                persona_id=scheduled_persona,
                 scope="conversation",
                 clear_context_on_switch=False,
                 announce=None,
@@ -589,7 +602,7 @@ class PersonaPlus(Star):
         logger.info(
             "Persona+ 已完成定时交班：%s -> %s (%s)",
             current_persona or "<unset>",
-            decision.target_persona,
+            scheduled_persona,
             handover_reason,
         )
         return True
