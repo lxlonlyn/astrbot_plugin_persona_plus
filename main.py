@@ -418,6 +418,30 @@ class PersonaPlus(Star):
             secondary_persona=self.shift_secondary_persona,
         )
 
+        cid = await self.context.conversation_manager.get_curr_conversation_id(
+            event.unified_msg_origin
+        )
+        if not cid:
+            try:
+                _, canonical_target = await self.resolver.resolve_for_event(
+                    event,
+                    decision.target_persona,
+                    require_existing=True,
+                )
+            except ValueError as exc:
+                logger.warning("Persona+ 定时轮班人格无效：%s", exc)
+                return False
+
+            await self._ensure_current_conversation(
+                event,
+                persona_id=canonical_target,
+            )
+            logger.info(
+                "Persona+ 首条消息直接绑定当前值班人格：%s",
+                canonical_target,
+            )
+            return True
+
         current_persona = await self._get_current_persona_id(event)
         state = await self._get_shift_state(event)
 
