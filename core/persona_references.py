@@ -63,6 +63,17 @@ class PersonaReferenceResolver:
                 (item for item in children if item.name == folder_name), None
             )
             if matched is None:
+                folded_name = folder_name.casefold()
+                folded_matches = [
+                    item for item in children if item.name.casefold() == folded_name
+                ]
+                if len(folded_matches) == 1:
+                    matched = folded_matches[0]
+                elif len(folded_matches) > 1:
+                    raise ValueError(
+                        f"文件夹名称大小写存在歧义：{folder_name}"
+                    )
+            if matched is None:
                 if not create_missing:
                     raise ValueError(f"未找到文件夹路径：{'/'.join(folder_parts)}")
                 matched = await self.persona_mgr.create_folder(
@@ -118,13 +129,33 @@ class PersonaReferenceResolver:
 
         try:
             persona = await self.persona_mgr.get_persona(persona_id)
-        except ValueError as exc:
-            raise ValueError(f"未找到人格：{persona_reference}") from exc
+            resolved_persona_id = persona_id
+        except ValueError:
+            folded_id = persona_id.casefold()
+            personas = await self.persona_mgr.get_all_personas()
+            folded_matches = [
+                item
+                for item in personas
+                if str(getattr(item, "persona_id", "")).casefold() == folded_id
+                and (
+                    folder_id is None
+                    or getattr(item, "folder_id", None) == folder_id
+                )
+            ]
+            if len(folded_matches) == 1:
+                persona = folded_matches[0]
+                resolved_persona_id = str(persona.persona_id)
+            elif len(folded_matches) > 1:
+                raise ValueError(
+                    f"人格 ID 大小写存在歧义：{persona_reference}"
+                )
+            else:
+                raise ValueError(f"未找到人格：{persona_reference}")
 
         if folder_id is not None and getattr(persona, "folder_id", None) != folder_id:
             raise ValueError(f"未找到人格：{persona_reference}")
 
-        return folder_id, persona_id
+        return folder_id, resolved_persona_id
 
     async def folder_path_by_id(self, folder_id: str | None) -> str:
         if not folder_id:
