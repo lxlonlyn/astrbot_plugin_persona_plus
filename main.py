@@ -379,6 +379,13 @@ class PersonaPlus(Star):
             item.pop("tool_calls", None)
             item.pop("tool_call_id", None)
             contexts.append(item)
+
+        # context.messages 已包含触发工具的本轮用户消息；委托任务会作为新的
+        # prompt 传给目标人格，因此移除最后一条 user，避免同一问题重复出现。
+        for index in range(len(contexts) - 1, -1, -1):
+            if contexts[index].get("role") == "user":
+                contexts.pop(index)
+                break
         return contexts
 
     async def _delegate_persona(
