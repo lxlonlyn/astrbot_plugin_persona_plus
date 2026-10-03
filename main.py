@@ -310,8 +310,34 @@ class PersonaPlus(Star):
 
         return f"{text}  (管理员)" if command in self.admin_commands else text
 
+    async def _ensure_current_conversation(
+        self,
+        event: AstrMessageEvent,
+        *,
+        persona_id: str | None = None,
+    ) -> str:
+        """Ensure this exact message origin has its own current conversation."""
+
+        conv_mgr = self.context.conversation_manager
+        cid = await conv_mgr.get_curr_conversation_id(event.unified_msg_origin)
+        if cid:
+            return cid
+
+        cid = await conv_mgr.new_conversation(
+            event.unified_msg_origin,
+            event.get_platform_id(),
+            persona_id=persona_id,
+        )
+        logger.info(
+            "Persona+ 为当前会话创建独立 conversation：umo=%s cid=%s persona=%s",
+            event.unified_msg_origin,
+            cid,
+            persona_id or "<default>",
+        )
+        return cid
+
     async def _get_current_persona_id(self, event: AstrMessageEvent) -> str | None:
-        """Get the persona currently bound to the active conversation."""
+        """Get the persona currently bound to this exact conversation."""
 
         cid = await self.context.conversation_manager.get_curr_conversation_id(
             event.unified_msg_origin
@@ -327,7 +353,7 @@ class PersonaPlus(Star):
             return None
         return conversation.persona_id
 
-    async def _get_shift_state_key(self, event: AstrMessageEvent) -> str:
+    async def _get_conversation_state_key(self, event: AstrMessageEvent) -> str:
         cid = await self.context.conversation_manager.get_curr_conversation_id(
             event.unified_msg_origin
         )
@@ -337,7 +363,7 @@ class PersonaPlus(Star):
         self,
         event: AstrMessageEvent,
     ) -> ShiftRuntimeState:
-        key = await self._get_shift_state_key(event)
+        key = await self._get_conversation_state_key(event)
         state = self._shift_states.get(key)
         if state is None:
             state = ShiftRuntimeState()
