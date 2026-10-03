@@ -1,3 +1,10 @@
+# v1.5.0
+
+- 新增 `persona_delegate`：可临时委托指定人格处理一次任务，不修改当前会话人格。
+- 委托人格使用自身 System Prompt 与工具白名单运行独立 Agent。
+- 委托期间自动屏蔽 Persona+ 人格管理工具，避免递归委托和意外切换。
+- 新增 `delegate` 函数工具配置项，默认不启用，保持向后兼容。
+
 ### 更新日志
 #### v1.4.9
   - 新增 `persona_avatar` 函数工具，支持 get / set / remove
