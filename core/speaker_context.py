@@ -29,14 +29,32 @@ def ensure_speaker_label(
     *,
     temporary_initial: bool = False,
 ) -> str:
-    """Prefix a visible speaker label unless the text already has one."""
+    """Ensure the visible label matches the actual speaker.
+
+    A wrong model-generated leading persona label is replaced rather than trusted.
+    Internal handover/legacy markers are left untouched.
+    """
 
     value = str(text or "").strip()
     if not value:
         return value
-    if has_explicit_speaker_marker(value):
+
+    expected = speaker_label(
+        persona_id,
+        temporary_initial=temporary_initial,
+    )
+    visible_match = SPEAKER_HEADER_RE.match(value)
+    if visible_match:
+        body = value[visible_match.end() :].lstrip()
+        current_header = visible_match.group(0).strip()
+        if current_header == expected:
+            return value
+        return f"{expected}\n\n{body}" if body else expected
+
+    if INTERNAL_SPEAKER_RE.match(value) or HANDOVER_RE.match(value):
         return value
-    return f"{speaker_label(persona_id, temporary_initial=temporary_initial)}\n\n{value}"
+
+    return f"{expected}\n\n{value}"
 
 
 def handover_marker(from_persona: str, to_persona: str) -> str:
