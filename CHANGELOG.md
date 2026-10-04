@@ -1,3 +1,15 @@
+# v1.8.0
+
+- 保留共享 conversation，不在交班时清空或总结上下文，避免打断尚未完成的连续任务。
+- 新增正式说话人标签：正常值班回复会以 `【Arona】` / `【Plana】` 开头；临时首次发言继续使用 `【Persona｜临时插话】`。
+- 新增每轮运行时身份锚点，使用 AstrBot `extra_user_content_parts.mark_as_temp()` 注入，不修改稳定 System Prompt，尽量保留提示词缓存。
+- 身份锚点同时记录 current_speaker、formal_on_duty 与 speaker_mode，明确共享历史中的另一人格发言不能改变本轮身份。
+- 对历史中旧的、没有 speaker 标签的 assistant 消息，仅在送入 LLM 时临时标记为 `[SPEAKER=legacy-unattributed]`，不篡改原数据库历史，也不猜测旧消息究竟是谁说的。
+- 新增轻量交班边界 `[PERSONA_HANDOVER from=... to=...]`，只标记正式值班变化和任务连续性，不调用 LLM 做摘要。
+- 正式回复若模型错误输出了另一人格标签，会在最终响应持久化前纠正为实际值班人格，并避免重复标签。
+- 临时 delegate / 临时前台调用同样获得独立身份锚点，但不会被误认为正式接班。
+- 新增 speaker 标签、错误标签纠正、legacy 历史标记、身份锚点和交班边界回归测试。
+
 # v1.7.0
 
 - 所有动态人格状态强制按当前 conversation 隔离；群 A、群 B、私聊与不同 conversation 不共享轮班/临时前台状态。
