@@ -1014,15 +1014,32 @@ class PersonaPlus(Star):
             "[/Persona+ temporary foreground]"
         )
 
-        llm_resp = await self.context.tool_loop_agent(
-            event=event,
-            chat_provider_id=provider_id,
-            prompt=prompt.strip(),
-            contexts=contexts or None,
-            system_prompt=(persona.system_prompt or "").rstrip() + delegate_notice,
-            tools=self._delegate_toolset(persona),
-            max_steps=16,
+        previous_speaker = event.get_extra(self.RUNTIME_SPEAKER_EXTRA, None)
+        previous_on_duty = event.get_extra(self.RUNTIME_ON_DUTY_EXTRA, None)
+        previous_temporary = event.get_extra(
+            self.RUNTIME_TEMPORARY_EXTRA,
+            False,
         )
+        on_duty_persona = await self._get_current_persona_id(event) or persona_id
+
+        event.set_extra(self.RUNTIME_SPEAKER_EXTRA, persona_id)
+        event.set_extra(self.RUNTIME_ON_DUTY_EXTRA, on_duty_persona)
+        event.set_extra(self.RUNTIME_TEMPORARY_EXTRA, True)
+        try:
+            llm_resp = await self.context.tool_loop_agent(
+                event=event,
+                chat_provider_id=provider_id,
+                prompt=prompt.strip(),
+                contexts=contexts or None,
+                system_prompt=(persona.system_prompt or "").rstrip() + delegate_notice,
+                tools=self._delegate_toolset(persona),
+                max_steps=16,
+            )
+        finally:
+            event.set_extra(self.RUNTIME_SPEAKER_EXTRA, previous_speaker)
+            event.set_extra(self.RUNTIME_ON_DUTY_EXTRA, previous_on_duty)
+            event.set_extra(self.RUNTIME_TEMPORARY_EXTRA, previous_temporary)
+
         reply = (llm_resp.completion_text or "").strip()
         if not reply:
             raise ValueError(f"人格 {persona_id} 未生成可用回复。")
