@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from .speaker_context import ensure_speaker_label
+
 
 @dataclass(slots=True)
 class ForegroundLease:
@@ -41,14 +43,13 @@ def render_speaker_block(
     *,
     initial: bool,
 ) -> str:
-    """Render a visible but implementation-agnostic speaker marker."""
+    """Render a visible temporary-speaker marker without duplicating labels."""
 
-    label = (
-        f"【{persona_id}｜临时插话】"
-        if initial
-        else f"【{persona_id}】"
+    return ensure_speaker_label(
+        persona_id,
+        reply,
+        temporary_initial=initial,
     )
-    return f"{label}\n\n{reply.strip()}"
 
 
 def conversation_state_key(
