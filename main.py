@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
-from astrbot.api.provider import LLMResponse
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import (
     AssistantMessageSegment,
@@ -44,6 +44,12 @@ from .core.shift_schedule import (
     resolve_shift,
     should_handover,
 )
+from .core.speaker_context import (
+    build_identity_anchor,
+    ensure_speaker_label,
+    handover_marker,
+    tag_legacy_assistant_contexts,
+)
 from .core.switching import switch_persona
 from .core.tool_names import build_persona_management_tool_names
 from .integrations.qq_profile_sync import QQProfileSync
@@ -64,6 +70,10 @@ class NotBarePersonaPlusCommandFilter(filter.CustomFilter):
 
 class PersonaPlus(Star):
     """Persona+ plugin entrypoint for lifecycle, commands, and event routing."""
+
+    RUNTIME_SPEAKER_EXTRA = "_persona_plus_runtime_speaker"
+    RUNTIME_ON_DUTY_EXTRA = "_persona_plus_runtime_on_duty"
+    RUNTIME_TEMPORARY_EXTRA = "_persona_plus_runtime_temporary"
 
     LLM_TOOL_NAME_BY_OPTION = {
         "list": "persona_list",
