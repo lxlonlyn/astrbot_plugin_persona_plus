@@ -745,6 +745,11 @@ class PersonaPlus(Star):
                 clear_context_on_switch=False,
                 announce=None,
             )
+            await self._append_handover_marker(
+                event,
+                from_persona=current_persona,
+                to_persona=scheduled_persona,
+            )
         except ValueError as exc:
             logger.warning("Persona+ 定时轮班切换失败：%s", exc)
             return False
@@ -897,6 +902,7 @@ class PersonaPlus(Star):
             persona_reference,
             require_existing=True,
         )
+        previous_persona = await self._get_current_persona_id(event)
         await switch_persona(
             context=self.context,
             persona_mgr=self.persona_mgr,
@@ -907,6 +913,12 @@ class PersonaPlus(Star):
             clear_context_on_switch=self.clear_context_on_switch,
             announce=None,
         )
+        if not self.clear_context_on_switch:
+            await self._append_handover_marker(
+                event,
+                from_persona=previous_persona,
+                to_persona=resolved_persona_id,
+            )
         await self._clear_foreground_lease(event)
         return f"已切换当前对话人格为 {resolved_persona_id}"
 
@@ -1168,6 +1180,7 @@ class PersonaPlus(Star):
         if announce is None and self.auto_switch_announce:
             announce = f"已切换人格为 {resolved_persona_id}"
 
+        previous_persona = await self._get_current_persona_id(event)
         result = await switch_persona(
             context=self.context,
             persona_mgr=self.persona_mgr,
@@ -1178,6 +1191,12 @@ class PersonaPlus(Star):
             clear_context_on_switch=self.clear_context_on_switch,
             announce=announce,
         )
+        if not self.clear_context_on_switch:
+            await self._append_handover_marker(
+                event,
+                from_persona=previous_persona,
+                to_persona=resolved_persona_id,
+            )
         await self._clear_foreground_lease(event)
         return result
 
