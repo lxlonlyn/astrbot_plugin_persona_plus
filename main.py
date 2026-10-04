@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
-from astrbot.api.provider import LLMResponse
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import (
     AssistantMessageSegment,
@@ -44,6 +44,12 @@ from .core.shift_schedule import (
     resolve_shift,
     should_handover,
 )
+from .core.speaker_context import (
+    build_identity_anchor,
+    ensure_speaker_label,
+    handover_marker,
+    tag_legacy_assistant_contexts,
+)
 from .core.switching import switch_persona
 from .core.tool_names import build_persona_management_tool_names
 from .integrations.qq_profile_sync import QQProfileSync
@@ -64,6 +70,10 @@ class NotBarePersonaPlusCommandFilter(filter.CustomFilter):
 
 class PersonaPlus(Star):
     """Persona+ plugin entrypoint for lifecycle, commands, and event routing."""
+
+    RUNTIME_SPEAKER_EXTRA = "_persona_plus_runtime_speaker"
+    RUNTIME_ON_DUTY_EXTRA = "_persona_plus_runtime_on_duty"
+    RUNTIME_TEMPORARY_EXTRA = "_persona_plus_runtime_temporary"
 
     LLM_TOOL_NAME_BY_OPTION = {
         "list": "persona_list",
@@ -471,6 +481,146 @@ class PersonaPlus(Star):
             ),
         )
 
+    async def _append_handover_marker(
+        self,
+        event: AstrMessageEvent,
+        *,
+        from_persona: str | None,
+        to_persona: str,
+    ) -> None:
+        """Persist a lightweight identity boundary without summarizing or clearing history."""
+
+        if not from_persona:
+            return
+        if from_persona.casefold() == to_persona.casefold():
+            return
+
+        cid = await self._ensure_current_conversation(event, persona_id=to_persona)
+        conversation = await self.context.conversation_manager.get_conversation(
+            event.unified_msg_origin,
+            cid,
+        )
+        if not conversation:
+            return
+
+        try:
+            history = json.loads(conversation.history or "[]")
+        except (TypeError, json.JSONDecodeError):
+            history = []
+
+        marker_text = handover_marker(from_persona, to_persona)
+
+        if history:
+            last = history[-1]
+            if isinstance(last, dict):
+                content = last.get("content", "")
+                if isinstance(content, str):
+                    last_text = content
+                elif isinstance(content, list):
+                    last_text = "".join(
+                        str(part.get("text", ""))
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+                else:
+                    last_text = ""
+                if marker_text == last_text.strip():
+                    return
+
+        history.append(
+            AssistantMessageSegment(
+                content=[TextPart(text=marker_text)]
+            ).model_dump()
+        )
+        await self.context.conversation_manager.update_conversation(
+            unified_msg_origin=event.unified_msg_origin,
+            conversation_id=cid,
+            history=history,
+        )
+        logger.info(
+            "Persona+ 已写入交班边界：%s -> %s (umo=%s cid=%s)",
+            from_persona,
+            to_persona,
+            event.unified_msg_origin,
+            cid,
+        )
+
+    @staticmethod
+    def _request_has_identity_anchor(req: ProviderRequest) -> bool:
+        for part in req.extra_user_content_parts or []:
+            if isinstance(part, dict):
+                text = str(part.get("text", ""))
+            else:
+                text = str(getattr(part, "text", ""))
+            if "<persona_runtime>" in text:
+                return True
+        return False
+
+    @filter.on_llm_request(priority=100)
+    async def inject_runtime_identity(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        """Anchor the speaker every turn without mutating the stable system prompt."""
+
+        on_duty = event.get_extra(self.RUNTIME_ON_DUTY_EXTRA, None)
+        if not on_duty:
+            on_duty = await self._get_current_persona_id(event)
+
+        speaker = event.get_extra(self.RUNTIME_SPEAKER_EXTRA, None) or on_duty
+        if not speaker:
+            return
+
+        temporary = bool(
+            event.get_extra(self.RUNTIME_TEMPORARY_EXTRA, False)
+        )
+
+        # Old shared history predates speaker labels. Mark it as unattributed only
+        # in this request, so its wording cannot redefine the current identity.
+        req.contexts = tag_legacy_assistant_contexts(req.contexts)
+
+        if self._request_has_identity_anchor(req):
+            return
+
+        anchor = build_identity_anchor(
+            current_speaker=str(speaker),
+            on_duty_persona=str(on_duty or speaker),
+            temporary=temporary,
+            require_visible_label=not temporary,
+        )
+        req.extra_user_content_parts.append(
+            TextPart(text=anchor).mark_as_temp()
+        )
+
+    @filter.on_llm_response(priority=100)
+    async def enforce_formal_speaker_label(
+        self,
+        event: AstrMessageEvent,
+        resp: LLMResponse,
+    ) -> None:
+        """Make stored/formal replies carry the actual on-duty speaker label."""
+
+        if event.get_extra(self.RUNTIME_TEMPORARY_EXTRA, False):
+            # Temporary persona replies are labelled by render_speaker_block().
+            return
+        if resp.role != "assistant":
+            return
+
+        text = (resp.completion_text or "").strip()
+        if not text:
+            return
+
+        current_persona = await self._get_current_persona_id(event)
+        if not current_persona:
+            return
+
+        resp.completion_text = ensure_speaker_label(
+            current_persona,
+            text,
+            temporary_initial=False,
+        )
+
     def _resolve_shift_timezone(self, event: AstrMessageEvent):
         timezone_name = self.shift_timezone
         if not timezone_name:
@@ -594,6 +744,11 @@ class PersonaPlus(Star):
                 scope="conversation",
                 clear_context_on_switch=False,
                 announce=None,
+            )
+            await self._append_handover_marker(
+                event,
+                from_persona=current_persona,
+                to_persona=scheduled_persona,
             )
         except ValueError as exc:
             logger.warning("Persona+ 定时轮班切换失败：%s", exc)
@@ -747,6 +902,7 @@ class PersonaPlus(Star):
             persona_reference,
             require_existing=True,
         )
+        previous_persona = await self._get_current_persona_id(event)
         await switch_persona(
             context=self.context,
             persona_mgr=self.persona_mgr,
@@ -757,6 +913,12 @@ class PersonaPlus(Star):
             clear_context_on_switch=self.clear_context_on_switch,
             announce=None,
         )
+        if not self.clear_context_on_switch:
+            await self._append_handover_marker(
+                event,
+                from_persona=previous_persona,
+                to_persona=resolved_persona_id,
+            )
         await self._clear_foreground_lease(event)
         return f"已切换当前对话人格为 {resolved_persona_id}"
 
@@ -852,15 +1014,32 @@ class PersonaPlus(Star):
             "[/Persona+ temporary foreground]"
         )
 
-        llm_resp = await self.context.tool_loop_agent(
-            event=event,
-            chat_provider_id=provider_id,
-            prompt=prompt.strip(),
-            contexts=contexts or None,
-            system_prompt=(persona.system_prompt or "").rstrip() + delegate_notice,
-            tools=self._delegate_toolset(persona),
-            max_steps=16,
+        previous_speaker = event.get_extra(self.RUNTIME_SPEAKER_EXTRA, None)
+        previous_on_duty = event.get_extra(self.RUNTIME_ON_DUTY_EXTRA, None)
+        previous_temporary = event.get_extra(
+            self.RUNTIME_TEMPORARY_EXTRA,
+            False,
         )
+        on_duty_persona = await self._get_current_persona_id(event) or persona_id
+
+        event.set_extra(self.RUNTIME_SPEAKER_EXTRA, persona_id)
+        event.set_extra(self.RUNTIME_ON_DUTY_EXTRA, on_duty_persona)
+        event.set_extra(self.RUNTIME_TEMPORARY_EXTRA, True)
+        try:
+            llm_resp = await self.context.tool_loop_agent(
+                event=event,
+                chat_provider_id=provider_id,
+                prompt=prompt.strip(),
+                contexts=contexts or None,
+                system_prompt=(persona.system_prompt or "").rstrip() + delegate_notice,
+                tools=self._delegate_toolset(persona),
+                max_steps=16,
+            )
+        finally:
+            event.set_extra(self.RUNTIME_SPEAKER_EXTRA, previous_speaker)
+            event.set_extra(self.RUNTIME_ON_DUTY_EXTRA, previous_on_duty)
+            event.set_extra(self.RUNTIME_TEMPORARY_EXTRA, previous_temporary)
+
         reply = (llm_resp.completion_text or "").strip()
         if not reply:
             raise ValueError(f"人格 {persona_id} 未生成可用回复。")
@@ -1018,6 +1197,7 @@ class PersonaPlus(Star):
         if announce is None and self.auto_switch_announce:
             announce = f"已切换人格为 {resolved_persona_id}"
 
+        previous_persona = await self._get_current_persona_id(event)
         result = await switch_persona(
             context=self.context,
             persona_mgr=self.persona_mgr,
@@ -1028,6 +1208,12 @@ class PersonaPlus(Star):
             clear_context_on_switch=self.clear_context_on_switch,
             announce=announce,
         )
+        if not self.clear_context_on_switch:
+            await self._append_handover_marker(
+                event,
+                from_persona=previous_persona,
+                to_persona=resolved_persona_id,
+            )
         await self._clear_foreground_lease(event)
         return result
 
