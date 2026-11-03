@@ -927,11 +927,15 @@ class PersonaPlus(Star):
 
     async def _run_llm_tool(
         self,
+        event: AstrMessageEvent | None,
         action: str,
         runner: Callable[[], Awaitable[ToolResult]],
         failure_message: str,
     ) -> ToolResult | str:
-        """Run an LLM tool with consistent error handling."""
+        """Run management/delegation tools only for explicitly enabled profiles."""
+
+        if event is None or self._get_profile_rule(event) is None:
+            return "Persona+ 未对当前 AstrBot 配置文件启用人格管理工具。"
 
         try:
             return await runner()
@@ -1104,6 +1108,8 @@ class PersonaPlus(Star):
     ) -> str:
         """Run one isolated task as another persona without changing conversation persona."""
 
+        if self._get_profile_rule(event) is None:
+            raise ValueError("当前 AstrBot 配置文件未启用 Persona+。")
         if not persona_reference.strip():
             raise ValueError("必须指定要临时委托的人格。")
         if not task.strip():
@@ -1141,6 +1147,8 @@ class PersonaPlus(Star):
     ) -> str | None:
         """Let a recently summoned persona answer short follow-ups in this conversation."""
 
+        if self._get_profile_rule(event) is None:
+            return None
         if not self.foreground_continuation_enabled:
             return None
 
@@ -1566,11 +1574,14 @@ class PersonaPlus(Star):
     # ==================== Shift schedule / foreground / compatibility listener ====================
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
-        is_persona_command = self._is_persona_plus_command(event)
+        # Fail closed: unlisted AstrBot configs receive no automatic Persona+
+        # mutation, regardless of the legacy global schedule settings.
+        rule = self._get_profile_rule(event)
+        if rule is None:
+            return
 
-        # 正式轮班只修改当前 unified_msg_origin 下当前 conversation，
-        # 不修改 session/global 默认人格，因此群 A 与群 B、私聊之间互不影响。
-        if self.shift_schedule_enabled and not is_persona_command:
+        is_persona_command = self._is_persona_plus_command(event)
+        if rule.mode == "shift" and not is_persona_command:
             await self._maybe_apply_shift_schedule(event)
 
         # 最近被点名叫出的角色获得一个很短的“前台发言窗口”。
@@ -1582,10 +1593,10 @@ class PersonaPlus(Star):
                 event.stop_event()
                 return
 
-        if self.shift_schedule_enabled:
+        if rule.mode != "keyword":
             return
 
-        # 未开启轮班时保留旧版关键词自动切换能力，但仍强制 conversation 级。
+        # Keyword switching is also scoped to explicitly opted-in profiles.
         text = event.get_message_str()
         if not text or not self.keyword_switch_enabled or not self.keyword_mappings:
             return
