@@ -1,51 +1,145 @@
 {
+  "shift_profile_rules": {
+    "type": "template_list",
+    "description": "按 AstrBot 配置文件 ID 独立启用 Persona+",
+    "hint": "默认无规则：不会自动接管任何 Bot。可在目标 Bot 发送 /pp 查看配置文件 ID；相同 ID 只能配置一次。未列入的配置文件不会自动切换或注入身份标记。",
+    "default": [],
+    "templates": {
+      "two_persona": {
+        "name": "配置文件独立人格规则",
+        "display_item": "config_id",
+        "hide_hint_in_list": true,
+        "hint": "一个条目对应一个 AstrBot 配置文件。shift 表示双人格轮班；keyword 表示使用旧关键词映射且不轮班。",
+        "items": {
+          "config_id": {
+            "description": "AstrBot 配置文件 ID",
+            "type": "string",
+            "default": "",
+            "hint": "例如 default 或 UUID；发送 /pp 可查看当前对话所属 ID。禁止 * / all。"
+          },
+          "enabled": {
+            "description": "启用这条配置文件规则",
+            "type": "bool",
+            "default": true,
+            "hint": "关闭后该配置文件完全不受自动人格管理影响。"
+          },
+          "mode": {
+            "description": "管理模式",
+            "type": "string",
+            "default": "shift",
+            "hint": "shift 使用独立时间表；keyword 仅允许该配置使用旧 keyword_mappings。",
+            "options": [
+              "shift",
+              "keyword"
+            ]
+          },
+          "primary_persona": {
+            "description": "轮班时段内人格 ID",
+            "type": "string",
+            "default": "Arona",
+            "hint": "mode=shift 时使用。"
+          },
+          "secondary_persona": {
+            "description": "轮班时段外人格 ID",
+            "type": "string",
+            "default": "Plana",
+            "hint": "mode=shift 时使用。"
+          },
+          "start_time": {
+            "description": "轮班开始时间 (HH:MM)",
+            "type": "string",
+            "default": "07:00",
+            "hint": "含开始时间；支持 19:00 至次日 07:00 等跨午夜区间。"
+          },
+          "end_time": {
+            "description": "轮班结束时间 (HH:MM)",
+            "type": "string",
+            "default": "19:00",
+            "hint": "不含结束时间。"
+          },
+          "timezone": {
+            "description": "轮班时区",
+            "type": "string",
+            "default": "",
+            "hint": "留空则跟随当前会话的 AstrBot timezone；可用 Asia/Shanghai、Asia/Tokyo。"
+          },
+          "idle_seconds": {
+            "description": "交班空闲冷却秒数",
+            "type": "int",
+            "default": 60,
+            "hint": "上一轮结束后需空闲多久才自然交班。"
+          },
+          "grace_seconds": {
+            "description": "交班最长宽限秒数",
+            "type": "int",
+            "default": 300,
+            "hint": "超过轮班边界后最多允许持续多少秒，正在执行的轮次仍会完成。"
+          },
+          "takeover_existing_conversations": {
+            "description": "允许接管已有第三方人格",
+            "type": "bool",
+            "default": false,
+            "hint": "默认不覆盖已有对话中非本规则两位人格的 persona_id；明确需要接管时才开启。"
+          }
+        }
+      }
+    }
+  },
   "enable_shift_schedule": {
     "description": "启用定时人格轮班",
-    "hint": "启用后，仅在收到消息时进行本地时间检查；不会额外调用 LLM。关键词自动切换会在轮班模式下停用。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "bool",
-    "default": false
+    "default": false,
+    "invisible": true
   },
   "shift_primary_persona": {
     "description": "时段内人格",
-    "hint": "在开始时间（含）到结束时间（不含）之间负责值班的人格 ID，例如 arona。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "string",
-    "default": "arona"
+    "default": "arona",
+    "invisible": true
   },
   "shift_secondary_persona": {
     "description": "时段外人格",
-    "hint": "在设定时段之外负责值班的人格 ID，例如 plana。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "string",
-    "default": "plana"
+    "default": "plana",
+    "invisible": true
   },
   "shift_start_time": {
     "description": "轮班时段开始时间",
-    "hint": "24 小时制 HH:MM，例如 07:00。允许跨午夜，例如 19:00 到 07:00。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "string",
-    "default": "07:00"
+    "default": "07:00",
+    "invisible": true
   },
   "shift_end_time": {
     "description": "轮班时段结束时间",
-    "hint": "24 小时制 HH:MM，例如 19:00。开始与结束时间不能相同。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "string",
-    "default": "19:00"
+    "default": "19:00",
+    "invisible": true
   },
   "shift_timezone": {
     "description": "轮班时区",
-    "hint": "留空时跟随 AstrBot 当前会话的 timezone；也可填写 IANA 时区，例如 Asia/Shanghai 或 Asia/Tokyo。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "string",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "handover_idle_seconds": {
     "description": "连续对话空闲判定",
-    "hint": "到达交班点后，上一轮回答结束并空闲这么多秒，下一条消息才自然交给新人格。设为 0 表示不等待空闲。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "int",
-    "default": 60
+    "default": 60,
+    "invisible": true
   },
   "handover_grace_seconds": {
     "description": "最长延迟交班",
-    "hint": "到达交班点后最多允许旧人格继续处理连续对话的秒数。超过后，当前正在处理的轮次仍做完，但下一轮必须交班。",
+    "hint": "旧版统一轮班字段，仅保留用于迁移查看；v1.9 不会读取这些字段进行自动接管。请改用上方 shift_profile_rules。",
     "type": "int",
-    "default": 300
+    "default": 300,
+    "invisible": true
   },
   "enable_foreground_continuation": {
     "description": "启用临时角色连续发言",
@@ -75,11 +169,13 @@
     "description": "关键词与人格切换映射列表",
     "hint": "每项填写一个映射字符串，格式为 关键词:人格ID；定时轮班启用时不会执行这些切换。",
     "type": "list",
-    "default": ["关键词:人格"]
+    "default": [
+      "关键词:人格"
+    ]
   },
   "auto_switch_scope": {
     "description": "人格切换作用范围",
-    "hint": "此 fork 强制使用 conversation 级隔离，避免群 A 的人格变化影响群 B、私聊或其他对话。",
+    "hint": "所有显式切换仍仅修改 conversation；自动行为额外要求当前 AstrBot 配置文件已在 shift_profile_rules 中启用。",
     "type": "string",
     "default": "conversation",
     "options": [
@@ -96,14 +192,40 @@
     "description": "需要管理员权限的指令列表",
     "hint": "switch 无论此处如何配置都仅允许管理员使用，用于调试和故障恢复。",
     "type": "list",
-    "options": ["switch", "create", "update", "delete", "export", "view", "list", "help", "avatar"],
-    "default": ["switch", "create", "update", "delete", "avatar", "export"]
+    "options": [
+      "switch",
+      "create",
+      "update",
+      "delete",
+      "export",
+      "view",
+      "list",
+      "help",
+      "avatar"
+    ],
+    "default": [
+      "switch",
+      "create",
+      "update",
+      "delete",
+      "avatar",
+      "export"
+    ]
   },
   "llm_tool_options": {
     "description": "函数工具选项",
     "hint": "向 LLM 暴露的人格工具。v1.6 起不再提供 switch；跨人格交互统一使用 delegate（一次性临时委托，不改变当前值班人格）。",
     "type": "list",
-    "options": ["list", "delegate", "view", "create", "update", "avatar", "export", "delete"],
+    "options": [
+      "list",
+      "delegate",
+      "view",
+      "create",
+      "update",
+      "avatar",
+      "export",
+      "delete"
+    ],
     "default": []
   },
   "enable_auto_switch_announce": {
