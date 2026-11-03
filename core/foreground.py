@@ -55,7 +55,8 @@ def render_speaker_block(
 def conversation_state_key(
     unified_msg_origin: str,
     conversation_id: str | None,
+    config_id: str | None = None,
 ) -> str:
-    """Build an isolation key that cannot leak runtime state across chats."""
+    """Isolate runtime state by AstrBot config, message origin and conversation."""
 
-    return f"{unified_msg_origin}:{conversation_id or '<current>'}"
+    return f"{config_id or '<unconfigured>'}:{unified_msg_origin}:{conversation_id or '<current>'}"

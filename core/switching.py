@@ -12,17 +12,12 @@ def set_default_persona(
     unified_msg_origin: str,
     persona_id: str,
 ) -> None:
-    if scope == "session":
-        config = context.astrbot_config_mgr.get_conf(unified_msg_origin)
-        if config:
-            provider_settings = config.setdefault("provider_settings", {})
-            provider_settings["default_personality"] = persona_id
-            config.save_config()
-    elif scope == "global":
-        config = context.astrbot_config_mgr.default_conf
-        provider_settings = config.setdefault("provider_settings", {})
-        provider_settings["default_personality"] = persona_id
-        config.save_config()
+    """Do not allow legacy session/global writes, even from an accidental caller."""
+    if scope != "conversation":
+        raise ValueError(
+            "Persona+ 仅支持 conversation 级人格切换；"
+            "禁止修改 AstrBot 配置文件默认人格。"
+        )
 
 
 async def update_current_conversation(
@@ -56,6 +51,8 @@ async def switch_persona(
     clear_context_on_switch: bool,
     announce: str | None = None,
 ) -> MessageEventResult | None:
+    if scope != "conversation":
+        raise ValueError("Persona+ 禁止 session/global 人格切换。")
     await persona_mgr.get_persona(persona_id)
 
     umo = event.unified_msg_origin

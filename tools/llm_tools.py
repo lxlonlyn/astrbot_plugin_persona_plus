@@ -73,6 +73,7 @@ class PersonaPlusListTool(_BasePersonaTool):
         folder_path = self._as_text(kwargs.get("folder_path", ""))
         event = self._get_event(context)
         return await plugin._run_llm_tool(
+            event,
             "list",
             lambda: plugin.renderer.render_list(folder_path or None, event=event),
             "查看人设列表失败，请稍后重试。",
@@ -108,6 +109,7 @@ class PersonaPlusSwitchTool(_BasePersonaTool):
 
         persona_reference = self._as_text(kwargs.get("persona_reference", ""))
         return await plugin._run_llm_tool(
+            event,
             "switch",
             lambda: plugin._switch_persona_by_reference(event, persona_reference),
             "切换人设失败，请稍后重试。",
@@ -151,6 +153,7 @@ class PersonaPlusDelegateTool(_BasePersonaTool):
         persona_reference = self._as_text(kwargs.get("persona_reference", ""))
         task = self._as_text(kwargs.get("task", ""))
         return await plugin._run_llm_tool(
+            event,
             "delegate",
             lambda: plugin._delegate_persona(
                 event=event,
@@ -191,6 +194,7 @@ class PersonaPlusViewTool(_BasePersonaTool):
         event = self._get_event(context)
         persona_reference = self._as_text(kwargs.get("persona_reference", ""))
         return await plugin._run_llm_tool(
+            event,
             "view",
             lambda: plugin.renderer.render_detail(persona_reference, event=event),
             "查看人设内容失败，请稍后重试。",
@@ -277,6 +281,7 @@ class PersonaPlusCreateTool(_BasePersonaTool):
             )
 
         return await plugin._run_llm_tool(
+            event,
             "create",
             create_persona,
             "创建人设失败，请稍后重试。",
@@ -367,6 +372,7 @@ class PersonaPlusUpdateTool(_BasePersonaTool):
             )
 
         return await plugin._run_llm_tool(
+            event,
             "update",
             update_persona,
             "更新人设失败，请稍后重试。",
@@ -435,6 +441,7 @@ class PersonaPlusAvatarTool(_BasePersonaTool):
             return f"已设置人格 {persona_id} 的头像"
 
         return await plugin._run_llm_tool(
+            event,
             "avatar",
             manage_avatar,
             "管理人设头像失败，请稍后重试。",
@@ -470,6 +477,7 @@ class PersonaPlusExportTool(_BasePersonaTool):
 
         persona_reference = self._as_text(kwargs.get("persona_reference", ""))
         return await plugin._run_llm_tool(
+            event,
             "export",
             lambda: plugin._send_export_file(event, persona_reference),
             "导出人设文件失败，请稍后重试。",
@@ -505,6 +513,7 @@ class PersonaPlusDeleteTool(_BasePersonaTool):
         event = self._get_event(context)
         persona_reference = self._as_text(kwargs.get("persona_reference", ""))
         return await plugin._run_llm_tool(
+            event,
             "delete",
             lambda: plugin.persona_service.delete_by_reference(
                 persona_reference,

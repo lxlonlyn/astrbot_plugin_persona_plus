@@ -34,6 +34,7 @@ from .core.foreground import (
 )
 from .core.keyword_switch import match_keyword
 from .core.permissions import check_permission
+from .core.profile_rules import ProfileRule, can_take_over_persona
 from .core.persona_references import PersonaReferenceResolver
 from .core.persona_rendering import PersonaRenderer
 from .core.persona_service import PersonaService
@@ -114,6 +115,7 @@ class PersonaPlus(Star):
         self.clear_context_on_switch = False
         self.llm_tool_options: set[str] = set()
 
+        self.profile_rules: dict[str, ProfileRule] = {}
         self.shift_schedule_enabled = False
         self.shift_primary_persona = "arona"
         self.shift_secondary_persona = "plana"
@@ -208,7 +210,10 @@ class PersonaPlus(Star):
         self.clear_context_on_switch = self.settings.clear_context_on_switch
         self.llm_tool_options = self.settings.llm_tool_options
 
-        self.shift_schedule_enabled = self.settings.shift_schedule_enabled
+        self.profile_rules = self.settings.profile_rules
+        self.shift_schedule_enabled = any(
+            rule.mode == "shift" for rule in self.profile_rules.values()
+        )
         self.shift_primary_persona = self.settings.shift_primary_persona
         self.shift_secondary_persona = self.settings.shift_secondary_persona
         self.shift_start_minutes = self.settings.shift_start_minutes
@@ -245,15 +250,12 @@ class PersonaPlus(Star):
             self.clear_context_on_switch,
         )
         logger.info(
-            "Persona+ 定时轮班：enabled=%s, %s=%s-%s, 时段外=%s, idle=%ss, grace=%ss, timezone=%s",
-            self.shift_schedule_enabled,
-            self.shift_primary_persona,
-            format_hhmm(self.shift_start_minutes),
-            format_hhmm(self.shift_end_minutes),
-            self.shift_secondary_persona,
-            self.handover_idle_seconds,
-            self.handover_grace_seconds,
-            self.shift_timezone or "<AstrBot>",
+            "Persona+ 按配置文件隔离：已启用 %d 条规则 (%s)；"
+            "未配置的 Bot 不执行自动轮班、关键词切换或身份注入。",
+            len(self.profile_rules),
+            ", ".join(
+                f"{key}:{rule.mode}" for key, rule in self.profile_rules.items()
+            ) or "<none>",
         )
         logger.info(
             "Persona+ 临时前台：enabled=%s, ttl=%ss, followups=%s, scope=conversation",
@@ -364,11 +366,27 @@ class PersonaPlus(Star):
             return None
         return conversation.persona_id
 
+    def _get_config_id(self, event: AstrMessageEvent) -> str:
+        """Use AstrBot's actual profile routing; never guess from bot names."""
+        try:
+            info = self.context.astrbot_config_mgr.get_conf_info(
+                event.unified_msg_origin
+            )
+            return str(info.get("id") or "").strip()
+        except Exception:  # noqa: BLE001
+            logger.exception("Persona+ 无法确定消息所属配置文件；已拒绝自动接管")
+            return ""
+
+    def _get_profile_rule(self, event: AstrMessageEvent) -> ProfileRule | None:
+        return self.profile_rules.get(self._get_config_id(event))
+
     async def _get_conversation_state_key(self, event: AstrMessageEvent) -> str:
         cid = await self.context.conversation_manager.get_curr_conversation_id(
             event.unified_msg_origin
         )
-        return conversation_state_key(event.unified_msg_origin, cid)
+        return conversation_state_key(
+            event.unified_msg_origin, cid, self._get_config_id(event)
+        )
 
     async def _get_shift_state(
         self,
@@ -405,7 +423,8 @@ class PersonaPlus(Star):
         persona_id: str,
     ) -> None:
         if (
-            not self.foreground_continuation_enabled
+            self._get_profile_rule(event) is None
+            or not self.foreground_continuation_enabled
             or self.foreground_ttl_seconds <= 0
             or self.foreground_followup_turns <= 0
         ):
@@ -562,7 +581,10 @@ class PersonaPlus(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        """Anchor the speaker every turn without mutating the stable system prompt."""
+        """Anchor only managed profile speakers; leave other bots untouched."""
+
+        if self._get_profile_rule(event) is None:
+            return
 
         on_duty = event.get_extra(self.RUNTIME_ON_DUTY_EXTRA, None)
         if not on_duty:
@@ -599,7 +621,10 @@ class PersonaPlus(Star):
         event: AstrMessageEvent,
         resp: LLMResponse,
     ) -> None:
-        """Make stored/formal replies carry the actual on-duty speaker label."""
+        """Mark speakers only when the configuration explicitly opts in."""
+
+        if self._get_profile_rule(event) is None:
+            return
 
         if event.get_extra(self.RUNTIME_TEMPORARY_EXTRA, False):
             # Temporary persona replies are labelled by render_speaker_block().
@@ -621,8 +646,8 @@ class PersonaPlus(Star):
             temporary_initial=False,
         )
 
-    def _resolve_shift_timezone(self, event: AstrMessageEvent):
-        timezone_name = self.shift_timezone
+    def _resolve_shift_timezone(self, event: AstrMessageEvent, rule: ProfileRule):
+        timezone_name = rule.timezone
         if not timezone_name:
             timezone_name = str(
                 self.context.get_config(event.unified_msg_origin).get("timezone")
@@ -653,20 +678,21 @@ class PersonaPlus(Star):
         self,
         event: AstrMessageEvent,
     ) -> bool:
-        """Apply a pending scheduled handover before the next message is processed."""
+        """Apply only the rule tied to this message's AstrBot config ID."""
 
-        if not self.shift_schedule_enabled:
+        rule = self._get_profile_rule(event)
+        if rule is None or rule.mode != "shift":
             return False
 
         now_utc = datetime.now(timezone.utc)
-        tz = self._resolve_shift_timezone(event)
+        tz = self._resolve_shift_timezone(event, rule)
         now_local = now_utc.astimezone(tz)
         decision = resolve_shift(
             now=now_local,
-            start_minutes=self.shift_start_minutes,
-            end_minutes=self.shift_end_minutes,
-            primary_persona=self.shift_primary_persona,
-            secondary_persona=self.shift_secondary_persona,
+            start_minutes=rule.start_minutes,
+            end_minutes=rule.end_minutes,
+            primary_persona=rule.primary_persona,
+            secondary_persona=rule.secondary_persona,
         )
 
         cid = await self.context.conversation_manager.get_curr_conversation_id(
@@ -706,6 +732,16 @@ class PersonaPlus(Star):
         current_persona = await self._get_current_persona_id(event)
         state = await self._get_shift_state(event)
 
+        if not can_take_over_persona(rule, current_persona):
+            # Keep manual/third-party personas unless explicitly opted in.
+            state.pending_persona = None
+            logger.debug(
+                "Persona+ 保留配置文件 %s 的已有非轮班人格 %s",
+                rule.config_id,
+                current_persona,
+            )
+            return False
+
         if (
             current_persona
             and current_persona.casefold() == scheduled_persona.casefold()
@@ -728,8 +764,8 @@ class PersonaPlus(Star):
             boundary_utc=boundary_utc,
             last_turn_finished_at_utc=state.last_turn_finished_at_utc,
             turn_inflight=state.turn_inflight,
-            idle_seconds=self.handover_idle_seconds,
-            grace_seconds=self.handover_grace_seconds,
+            idle_seconds=rule.idle_seconds,
+            grace_seconds=rule.grace_seconds,
         )
         if not handover_allowed:
             return False
@@ -769,7 +805,8 @@ class PersonaPlus(Star):
         event: AstrMessageEvent,
         run_context: ContextWrapper[AstrAgentContext],
     ):
-        if not self.shift_schedule_enabled:
+        rule = self._get_profile_rule(event)
+        if rule is None or rule.mode != "shift":
             return
         state = await self._get_shift_state(event)
         state.turn_inflight = True
@@ -782,7 +819,8 @@ class PersonaPlus(Star):
         run_context: ContextWrapper[AstrAgentContext],
         resp: LLMResponse,
     ):
-        if not self.shift_schedule_enabled:
+        rule = self._get_profile_rule(event)
+        if rule is None or rule.mode != "shift":
             return
         state = await self._get_shift_state(event)
         state.turn_inflight = False
@@ -795,28 +833,43 @@ class PersonaPlus(Star):
         prefix = self._get_command_prefix(event)
         cmd_alias_pp = f"{prefix}pp"
 
-        current_persona_id = await self._get_current_persona_id(event)
+        bound_persona_id = await self._get_current_persona_id(event)
+        current_persona_id = bound_persona_id
         if not current_persona_id:
-            current_persona_id = (
-                self.context.get_config(event.unified_msg_origin)
-                .get("provider_settings", {})
-                .get("default_personality", "default")
-            )
+            # AstrBot v4 reads defaults from agent_runner, not legacy
+            # provider_settings.default_personality.
+            try:
+                default_persona = await self.persona_mgr.get_default_persona_v3(
+                    event.unified_msg_origin
+                )
+                current_persona_id = (
+                    default_persona.get("name", "default")
+                    if isinstance(default_persona, dict)
+                    else getattr(default_persona, "name", "default")
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Persona+ 读取配置文件默认人格失败")
+                current_persona_id = "default"
 
+        config_id = self._get_config_id(event)
+        rule = self._get_profile_rule(event)
         lines = [
             "[Persona+ 状态]",
+            f"配置文件 ID：{config_id or '无法识别'}",
+            f"自动管理：{rule.mode if rule else '未启用'}",
             f"当前人格：{current_persona_id or '未设置'}",
+            f"对话绑定：{bound_persona_id or '<未绑定，使用配置文件默认>'}",
         ]
 
-        if self.shift_schedule_enabled:
+        if rule is not None and rule.mode == "shift":
             now_utc = datetime.now(timezone.utc)
-            tz = self._resolve_shift_timezone(event)
+            tz = self._resolve_shift_timezone(event, rule)
             decision = resolve_shift(
                 now=now_utc.astimezone(tz),
-                start_minutes=self.shift_start_minutes,
-                end_minutes=self.shift_end_minutes,
-                primary_persona=self.shift_primary_persona,
-                secondary_persona=self.shift_secondary_persona,
+                start_minutes=rule.start_minutes,
+                end_minutes=rule.end_minutes,
+                primary_persona=rule.primary_persona,
+                secondary_persona=rule.secondary_persona,
             )
             state = await self._get_shift_state(event)
             lines.extend(
@@ -829,10 +882,10 @@ class PersonaPlus(Star):
                     ),
                     (
                         "值班时段："
-                        f"{self.shift_primary_persona} "
-                        f"{format_hhmm(self.shift_start_minutes)}-"
-                        f"{format_hhmm(self.shift_end_minutes)}；"
-                        f"其他时间 {self.shift_secondary_persona}"
+                        f"{rule.primary_persona} "
+                        f"{format_hhmm(rule.start_minutes)}-"
+                        f"{format_hhmm(rule.end_minutes)}；"
+                        f"其他时间 {rule.secondary_persona}"
                     ),
                 ]
             )
@@ -878,11 +931,15 @@ class PersonaPlus(Star):
 
     async def _run_llm_tool(
         self,
+        event: AstrMessageEvent | None,
         action: str,
         runner: Callable[[], Awaitable[ToolResult]],
         failure_message: str,
     ) -> ToolResult | str:
-        """Run an LLM tool with consistent error handling."""
+        """Run management/delegation tools only for explicitly enabled profiles."""
+
+        if event is None or self._get_profile_rule(event) is None:
+            return "Persona+ 未对当前 AstrBot 配置文件启用人格管理工具。"
 
         try:
             return await runner()
@@ -1055,6 +1112,8 @@ class PersonaPlus(Star):
     ) -> str:
         """Run one isolated task as another persona without changing conversation persona."""
 
+        if self._get_profile_rule(event) is None:
+            raise ValueError("当前 AstrBot 配置文件未启用 Persona+。")
         if not persona_reference.strip():
             raise ValueError("必须指定要临时委托的人格。")
         if not task.strip():
@@ -1092,6 +1151,8 @@ class PersonaPlus(Star):
     ) -> str | None:
         """Let a recently summoned persona answer short follow-ups in this conversation."""
 
+        if self._get_profile_rule(event) is None:
+            return None
         if not self.foreground_continuation_enabled:
             return None
 
@@ -1517,11 +1578,14 @@ class PersonaPlus(Star):
     # ==================== Shift schedule / foreground / compatibility listener ====================
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
-        is_persona_command = self._is_persona_plus_command(event)
+        # Fail closed: unlisted AstrBot configs receive no automatic Persona+
+        # mutation, regardless of the legacy global schedule settings.
+        rule = self._get_profile_rule(event)
+        if rule is None:
+            return
 
-        # 正式轮班只修改当前 unified_msg_origin 下当前 conversation，
-        # 不修改 session/global 默认人格，因此群 A 与群 B、私聊之间互不影响。
-        if self.shift_schedule_enabled and not is_persona_command:
+        is_persona_command = self._is_persona_plus_command(event)
+        if rule.mode == "shift" and not is_persona_command:
             await self._maybe_apply_shift_schedule(event)
 
         # 最近被点名叫出的角色获得一个很短的“前台发言窗口”。
@@ -1533,10 +1597,10 @@ class PersonaPlus(Star):
                 event.stop_event()
                 return
 
-        if self.shift_schedule_enabled:
+        if rule.mode != "keyword":
             return
 
-        # 未开启轮班时保留旧版关键词自动切换能力，但仍强制 conversation 级。
+        # Keyword switching is also scoped to explicitly opted-in profiles.
         text = event.get_message_str()
         if not text or not self.keyword_switch_enabled or not self.keyword_mappings:
             return

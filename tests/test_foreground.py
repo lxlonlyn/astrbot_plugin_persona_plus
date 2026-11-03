@@ -66,3 +66,9 @@ def test_conversation_state_key_isolates_groups_and_conversations():
     assert group_a != group_b
     assert group_a != group_a_other_conv
     assert group_b != group_a_other_conv
+
+
+def test_conversation_state_key_separates_profile_rebinding():
+    before = conversation_state_key("qq:group:same", "conv-1", "profile-A")
+    after = conversation_state_key("qq:group:same", "conv-1", "profile-B")
+    assert before != after

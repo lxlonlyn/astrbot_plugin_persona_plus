@@ -6,6 +6,7 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
 from .models import KeywordMapping, parse_mapping_entry
+from .profile_rules import ProfileRule, parse_profile_rules
 from .shift_schedule import parse_hhmm
 
 LLM_TOOL_OPTIONS = (
@@ -76,6 +77,7 @@ class PersonaPlusSettings:
     auto_switch_announce: bool
     clear_context_on_switch: bool
     llm_tool_options: set[str]
+    profile_rules: dict[str, ProfileRule]
 
     shift_schedule_enabled: bool
     shift_primary_persona: str
@@ -106,6 +108,7 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
             auto_switch_announce=True,
             clear_context_on_switch=False,
             llm_tool_options=set(),
+            profile_rules={},
             shift_schedule_enabled=False,
             shift_primary_persona="arona",
             shift_secondary_persona="plana",
@@ -234,7 +237,19 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
         )
         timeout = 60
 
-    shift_schedule_enabled = bool(config.get("enable_shift_schedule", False))
+    profile_rules, profile_errors = parse_profile_rules(
+        config.get("shift_profile_rules", [])
+    )
+    for diagnostic in profile_errors:
+        logger.warning("Persona+ 配置文件规则：%s", diagnostic)
+    if bool(config.get("enable_shift_schedule", False)) and not profile_rules:
+        logger.warning(
+            "Persona+ 旧版统一轮班配置已经停用。请在 shift_profile_rules "
+            "中显式填写 AstrBot 配置文件 ID；未配置时不自动接管任何 Bot。"
+        )
+
+    # 以下字段仅为了兼容旧配置的读取，不再驱动自动轮班。
+    shift_schedule_enabled = False
     shift_primary_persona = str(
         config.get("shift_primary_persona", "arona") or ""
     ).strip()
@@ -288,6 +303,7 @@ def load_settings(config: AstrBotConfig | None) -> PersonaPlusSettings:
         auto_switch_announce=auto_switch_announce,
         clear_context_on_switch=clear_context_on_switch,
         llm_tool_options=llm_tool_options,
+        profile_rules=profile_rules,
         shift_schedule_enabled=shift_schedule_enabled,
         shift_primary_persona=shift_primary_persona,
         shift_secondary_persona=shift_secondary_persona,
