@@ -34,7 +34,7 @@ from .core.foreground import (
 )
 from .core.keyword_switch import match_keyword
 from .core.permissions import check_permission
-from .core.profile_rules import ProfileRule
+from .core.profile_rules import ProfileRule, can_take_over_persona
 from .core.persona_references import PersonaReferenceResolver
 from .core.persona_rendering import PersonaRenderer
 from .core.persona_service import PersonaService
@@ -732,14 +732,7 @@ class PersonaPlus(Star):
         current_persona = await self._get_current_persona_id(event)
         state = await self._get_shift_state(event)
 
-        if (
-            current_persona
-            and current_persona.casefold() not in {
-                rule.primary_persona.casefold(),
-                rule.secondary_persona.casefold(),
-            }
-            and not rule.takeover_existing_conversations
-        ):
+        if not can_take_over_persona(rule, current_persona):
             # Keep manual/third-party personas unless explicitly opted in.
             state.pending_persona = None
             logger.debug(
@@ -840,13 +833,23 @@ class PersonaPlus(Star):
         prefix = self._get_command_prefix(event)
         cmd_alias_pp = f"{prefix}pp"
 
-        current_persona_id = await self._get_current_persona_id(event)
+        bound_persona_id = await self._get_current_persona_id(event)
+        current_persona_id = bound_persona_id
         if not current_persona_id:
-            current_persona_id = (
-                self.context.get_config(event.unified_msg_origin)
-                .get("provider_settings", {})
-                .get("default_personality", "default")
-            )
+            # AstrBot v4 reads defaults from agent_runner, not legacy
+            # provider_settings.default_personality.
+            try:
+                default_persona = await self.persona_mgr.get_default_persona_v3(
+                    event.unified_msg_origin
+                )
+                current_persona_id = (
+                    default_persona.get("name", "default")
+                    if isinstance(default_persona, dict)
+                    else getattr(default_persona, "name", "default")
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Persona+ 读取配置文件默认人格失败")
+                current_persona_id = "default"
 
         config_id = self._get_config_id(event)
         rule = self._get_profile_rule(event)
@@ -855,6 +858,7 @@ class PersonaPlus(Star):
             f"配置文件 ID：{config_id or '无法识别'}",
             f"自动管理：{rule.mode if rule else '未启用'}",
             f"当前人格：{current_persona_id or '未设置'}",
+            f"对话绑定：{bound_persona_id or '<未绑定，使用配置文件默认>'}",
         ]
 
         if rule is not None and rule.mode == "shift":
