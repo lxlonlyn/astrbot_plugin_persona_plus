@@ -77,3 +77,22 @@ def test_overnight_and_takeover():
     assert not errors
     assert rules["night"].start_minutes == 1140
     assert rules["night"].takeover_existing_conversations
+
+def test_takeover_policy_respects_unrelated_existing_persona():
+    from core.profile_rules import can_take_over_persona
+
+    rule = parse_profile_rules([_rule("profile-A")])[0]["profile-A"]
+    assert can_take_over_persona(rule, None)
+    assert can_take_over_persona(rule, "Arona")
+    assert can_take_over_persona(rule, "PlAnA")
+    assert not can_take_over_persona(rule, "OtherBot")
+
+    forced = parse_profile_rules([
+        _rule("profile-A", takeover_existing_conversations=True)
+    ])[0]["profile-A"]
+    assert can_take_over_persona(forced, "OtherBot")
+
+    keyword = parse_profile_rules([
+        _rule("profile-B", mode="keyword")
+    ])[0]["profile-B"]
+    assert not can_take_over_persona(keyword, "OtherBot")
