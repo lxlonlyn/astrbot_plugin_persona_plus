@@ -646,8 +646,8 @@ class PersonaPlus(Star):
             temporary_initial=False,
         )
 
-    def _resolve_shift_timezone(self, event: AstrMessageEvent):
-        timezone_name = self.shift_timezone
+    def _resolve_shift_timezone(self, event: AstrMessageEvent, rule: ProfileRule):
+        timezone_name = rule.timezone
         if not timezone_name:
             timezone_name = str(
                 self.context.get_config(event.unified_msg_origin).get("timezone")
@@ -678,20 +678,21 @@ class PersonaPlus(Star):
         self,
         event: AstrMessageEvent,
     ) -> bool:
-        """Apply a pending scheduled handover before the next message is processed."""
+        """Apply only the rule tied to this message's AstrBot config ID."""
 
-        if not self.shift_schedule_enabled:
+        rule = self._get_profile_rule(event)
+        if rule is None or rule.mode != "shift":
             return False
 
         now_utc = datetime.now(timezone.utc)
-        tz = self._resolve_shift_timezone(event)
+        tz = self._resolve_shift_timezone(event, rule)
         now_local = now_utc.astimezone(tz)
         decision = resolve_shift(
             now=now_local,
-            start_minutes=self.shift_start_minutes,
-            end_minutes=self.shift_end_minutes,
-            primary_persona=self.shift_primary_persona,
-            secondary_persona=self.shift_secondary_persona,
+            start_minutes=rule.start_minutes,
+            end_minutes=rule.end_minutes,
+            primary_persona=rule.primary_persona,
+            secondary_persona=rule.secondary_persona,
         )
 
         cid = await self.context.conversation_manager.get_curr_conversation_id(
@@ -733,6 +734,23 @@ class PersonaPlus(Star):
 
         if (
             current_persona
+            and current_persona.casefold() not in {
+                rule.primary_persona.casefold(),
+                rule.secondary_persona.casefold(),
+            }
+            and not rule.takeover_existing_conversations
+        ):
+            # Keep manual/third-party personas unless explicitly opted in.
+            state.pending_persona = None
+            logger.debug(
+                "Persona+ 保留配置文件 %s 的已有非轮班人格 %s",
+                rule.config_id,
+                current_persona,
+            )
+            return False
+
+        if (
+            current_persona
             and current_persona.casefold() == scheduled_persona.casefold()
         ):
             state.pending_persona = None
@@ -753,8 +771,8 @@ class PersonaPlus(Star):
             boundary_utc=boundary_utc,
             last_turn_finished_at_utc=state.last_turn_finished_at_utc,
             turn_inflight=state.turn_inflight,
-            idle_seconds=self.handover_idle_seconds,
-            grace_seconds=self.handover_grace_seconds,
+            idle_seconds=rule.idle_seconds,
+            grace_seconds=rule.grace_seconds,
         )
         if not handover_allowed:
             return False
@@ -794,7 +812,8 @@ class PersonaPlus(Star):
         event: AstrMessageEvent,
         run_context: ContextWrapper[AstrAgentContext],
     ):
-        if not self.shift_schedule_enabled:
+        rule = self._get_profile_rule(event)
+        if rule is None or rule.mode != "shift":
             return
         state = await self._get_shift_state(event)
         state.turn_inflight = True
@@ -807,7 +826,8 @@ class PersonaPlus(Star):
         run_context: ContextWrapper[AstrAgentContext],
         resp: LLMResponse,
     ):
-        if not self.shift_schedule_enabled:
+        rule = self._get_profile_rule(event)
+        if rule is None or rule.mode != "shift":
             return
         state = await self._get_shift_state(event)
         state.turn_inflight = False
@@ -828,20 +848,24 @@ class PersonaPlus(Star):
                 .get("default_personality", "default")
             )
 
+        config_id = self._get_config_id(event)
+        rule = self._get_profile_rule(event)
         lines = [
             "[Persona+ 状态]",
+            f"配置文件 ID：{config_id or '无法识别'}",
+            f"自动管理：{rule.mode if rule else '未启用'}",
             f"当前人格：{current_persona_id or '未设置'}",
         ]
 
-        if self.shift_schedule_enabled:
+        if rule is not None and rule.mode == "shift":
             now_utc = datetime.now(timezone.utc)
-            tz = self._resolve_shift_timezone(event)
+            tz = self._resolve_shift_timezone(event, rule)
             decision = resolve_shift(
                 now=now_utc.astimezone(tz),
-                start_minutes=self.shift_start_minutes,
-                end_minutes=self.shift_end_minutes,
-                primary_persona=self.shift_primary_persona,
-                secondary_persona=self.shift_secondary_persona,
+                start_minutes=rule.start_minutes,
+                end_minutes=rule.end_minutes,
+                primary_persona=rule.primary_persona,
+                secondary_persona=rule.secondary_persona,
             )
             state = await self._get_shift_state(event)
             lines.extend(
@@ -854,10 +878,10 @@ class PersonaPlus(Star):
                     ),
                     (
                         "值班时段："
-                        f"{self.shift_primary_persona} "
-                        f"{format_hhmm(self.shift_start_minutes)}-"
-                        f"{format_hhmm(self.shift_end_minutes)}；"
-                        f"其他时间 {self.shift_secondary_persona}"
+                        f"{rule.primary_persona} "
+                        f"{format_hhmm(rule.start_minutes)}-"
+                        f"{format_hhmm(rule.end_minutes)}；"
+                        f"其他时间 {rule.secondary_persona}"
                     ),
                 ]
             )
