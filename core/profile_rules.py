@@ -125,3 +125,16 @@ def parse_profile_rules(raw: Any) -> tuple[dict[str, ProfileRule], list[str]]:
     for config_id in duplicates:
         rules.pop(config_id, None)
     return rules, errors
+
+
+def can_take_over_persona(rule: ProfileRule, current_persona: str | None) -> bool:
+    """Allow scheduled shifts, never take over third-party personas by default."""
+    if rule.mode != "shift":
+        return False
+    if not current_persona:
+        return True
+    return (
+        rule.takeover_existing_conversations
+        or current_persona.casefold()
+        in {rule.primary_persona.casefold(), rule.secondary_persona.casefold()}
+    )
